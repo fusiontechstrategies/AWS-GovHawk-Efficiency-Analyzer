@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a focused enhancement that preserves safe, read-mostly analysis.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        GovHawk's runnable analyzer must remain one Python file. Do not include sensitive environment details.
+  - type: textarea
+    id: need
+    attributes:
+      label: User need
+      description: Describe the problem or workflow the change would improve.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the desired output, CLI behavior, or analysis signal.
+    validations:
+      required: true
+  - type: textarea
+    id: aws_docs
+    attributes:
+      label: Relevant AWS documentation
+      description: Link authoritative GovCloud or AWS API documentation when applicable.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: This proposal does not require automatic remediation or undisclosed AWS writes.
+          required: true
+

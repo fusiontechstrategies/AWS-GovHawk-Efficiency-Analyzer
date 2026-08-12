@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible GovHawk problem using synthetic or redacted data.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, account IDs, resource names, report files, screenshots from real environments, CUI, or classified data.
+  - type: input
+    id: version
+    attributes:
+      label: GovHawk version
+      placeholder: "2.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: region
+    attributes:
+      label: GovCloud region
+      options:
+        - us-gov-west-1
+        - us-gov-east-1
+        - Not region-specific
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem
+      description: Explain what happened and what you expected, using synthetic identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include a sanitized command and the smallest safe reproduction.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include Python version and redacted error text. Do not attach a real report.
+

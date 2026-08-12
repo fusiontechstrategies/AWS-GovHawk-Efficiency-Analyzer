@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# GovHawk reports and test artifacts
+output/
+tmp/
+govhawk_report_*.pdf
+govhawk_report_*.json
+aws_govcloud_research_*.pdf
+*.log
+
+# Credentials, local configuration, and organization-specific branding
+.env
+.env.*
+!.env.example
+.aws/
+*.pem
+*.key
+*.p12
+*.pfx
+dod_seal.*
+local-logo.*
+
+# Operating systems and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

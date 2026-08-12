@@ -1,13 +1,31 @@
-# GovHawk AWS GovCloud Efficiency Analyzer
+# GovHawk: AWS GovCloud Efficiency Analyzer
 
-GovHawk is a single-file Python tool that inventories an AWS GovCloud (US)
-region and produces a review-ready PDF, JSON report, or both. It collects
-resource counts, selected CloudWatch metrics, configuration signals, and
-conservative recommendations across 29 AWS services.
+[![CI](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)
+![AWS GovCloud](https://img.shields.io/badge/AWS-GovCloud-FF9900)
+
+> One file. One command. A clearer view of potential waste, security blind
+> spots, and operational risk across 29 AWS GovCloud services.
+
+GovHawk inventories an AWS GovCloud (US) region and produces a review-ready PDF,
+JSON report, or both. It collects resource counts, selected CloudWatch metrics,
+configuration signals, and conservative recommendations without automatically
+changing the environment.
 
 The executable remains one file: `AWS_GovCloud_Analyzer.py`. The other files in
 this repository provide documentation, tests, dependency declarations, and
 continuous-integration support.
+
+## Why GovHawk
+
+- Cover 29 GovCloud services without installing a framework or deploying an
+  agent.
+- Distinguish missing metrics from genuine zero usage to reduce misleading
+  findings.
+- Give technical teams structured JSON and stakeholders a polished PDF from the
+  same run.
+- Keep recommendations evidence-based, review-only, and free of invented dollar
+  savings.
 
 ## Important boundaries
 

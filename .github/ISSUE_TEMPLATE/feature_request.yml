@@ -33,4 +33,3 @@ body:
       options:
         - label: This proposal does not require automatic remediation or undisclosed AWS writes.
           required: true
-

@@ -2,6 +2,9 @@
 
 Thank you for helping improve GovHawk.
 
+By submitting a contribution, you agree that it may be distributed under the
+Apache License 2.0 used by this project.
+
 ## Design constraint
 
 The runnable analyzer must remain a single Python file:
@@ -19,7 +22,10 @@ the project owner explicitly changes this constraint.
    ```text
    python -m unittest discover -s tests -v
    ruff check AWS_GovCloud_Analyzer.py tests
+   ruff format --check AWS_GovCloud_Analyzer.py tests
    mypy AWS_GovCloud_Analyzer.py --ignore-missing-imports
+   bandit -q -r AWS_GovCloud_Analyzer.py
+   pip-audit -r requirements.txt
    ```
 
 5. Render a representative PDF when report code changes and visually inspect

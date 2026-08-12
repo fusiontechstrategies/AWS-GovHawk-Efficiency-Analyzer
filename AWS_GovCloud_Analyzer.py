@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 """GovHawk: a single-file, read-mostly AWS GovCloud environment analyzer.
 
 The analyzer inventories supported services, evaluates a conservative set of
@@ -14,6 +16,7 @@ guaranteed savings forecast.
 # ============================================================================
 import argparse
 import datetime
+import html
 import json
 import logging
 import os
@@ -28,7 +31,6 @@ from datetime import timezone
 from pathlib import Path
 from time import sleep
 from typing import Any
-from xml.sax.saxutils import escape as xml_escape
 
 import boto3
 from botocore.config import Config
@@ -103,7 +105,7 @@ def sanitize_for_paragraph(text):
     """Escape XML special chars to prevent ReportLab XML injection."""
     if not isinstance(text, str):
         text = str(text)
-    return xml_escape(text, entities={'"': "&quot;", "'": "&#39;"})
+    return html.escape(text, quote=True)
 
 
 def shell_quote(value):
@@ -118,7 +120,9 @@ def sanitize_error_message(error):
     if isinstance(error, ClientError):
         code = error.response.get("Error", {}).get("Code", "Unknown")
         msg = error.response.get("Error", {}).get("Message", "Unknown error")
-        return f"{code}: {msg}"
+        safe_message = re.sub(r"(?<!\d)\d{12}(?!\d)", "[ACCOUNT_ID]", str(msg))
+        safe_message = re.sub(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "[ACCESS_KEY_ID]", safe_message)
+        return f"{code}: {safe_message}"
     if isinstance(error, NoCredentialsError):
         return "Credentials not found"
     return type(error).__name__
@@ -302,7 +306,7 @@ def setup_cloudwatch_logging(log_group, log_stream, region):
                     resp = client.put_log_events(**kwargs)
                     sequence_token[0] = resp.get("nextSequenceToken")
             except Exception:
-                pass  # Avoid recursive logging failures
+                return  # Avoid recursive logging failures
 
     handler = CloudWatchHandler()
     handler.setFormatter(JsonLogFormatter())
@@ -321,7 +325,7 @@ def research_s3(client, cw_client, skip_metrics=False):
     if "error" in response:
         return response
     buckets = response.get("Buckets", [])
-    logger.info(f"Found {len(buckets)} S3 buckets to analyze")
+    logger.info(f"Found {len(buckets)} S3 buckets across the GovCloud partition")
     end_time = datetime.datetime.now(timezone.utc)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
     region = research["region"]
@@ -332,12 +336,20 @@ def research_s3(client, cw_client, skip_metrics=False):
     public_bucket_count = 0
     public_status_unknown_count = 0
     encryption_unknown_count = 0
+    bucket_region_unknown_count = 0
 
     for bucket in buckets:
         if shutdown_event.is_set():
             break
         bucket_name = bucket["Name"]
-        logger.info(f"Processing S3 bucket: {bucket_name[:20]}...")
+        logger.debug(f"Processing S3 bucket: {bucket_name[:20]}...")
+        location = safe_api_call("S3", client.get_bucket_location, Bucket=bucket_name)
+        if "error" in location:
+            bucket_region_unknown_count += 1
+            continue
+        bucket_region = location.get("LocationConstraint") or "us-east-1"
+        if bucket_region != region:
+            continue
         metrics = get_cloudwatch_metric(
             cw_client,
             "AWS/S3",
@@ -502,11 +514,19 @@ def research_s3(client, cw_client, skip_metrics=False):
         general_recommendations.append(
             {"description": f"Encryption settings could not be verified for {encryption_unknown_count} buckets."}
         )
+    if bucket_region_unknown_count > 0:
+        general_recommendations.append(
+            {
+                "description": f"Region could not be verified for {bucket_region_unknown_count} partition-wide buckets, so they were excluded from this regional analysis."
+            }
+        )
 
     logger.info("=== Completed S3 Research ===")
     return {
-        "bucket_count": len(buckets),
+        "partition_bucket_count": len(buckets),
+        "bucket_count": len(bucket_details),
         "buckets_analyzed": len(bucket_details),
+        "bucket_region_unknown_count": bucket_region_unknown_count,
         "public_bucket_count": public_bucket_count,
         "public_status_unknown_count": public_status_unknown_count,
         "lifecycle_unknown_count": lifecycle_unknown_count,
@@ -531,7 +551,7 @@ def research_vpc(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         vpc_id = vpc["VpcId"]
-        logger.info(f"Processing VPC: {vpc_id}")
+        logger.debug(f"Processing VPC: {vpc_id}")
         subnets = paginated_api_call(
             "VPC",
             client,
@@ -586,7 +606,7 @@ def research_direct_connect(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         conn_id = conn["connectionId"]
-        logger.info(f"Processing Direct Connect connection: {conn_id}")
+        logger.debug(f"Processing Direct Connect connection: {conn_id}")
         detail = {
             "connection_id": conn_id,
             "state": conn.get("connectionState", "N/A"),
@@ -628,7 +648,7 @@ def research_backup(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         plan_id = plan["BackupPlanId"]
-        logger.info(f"Processing Backup plan: {plan_id}")
+        logger.debug(f"Processing Backup plan: {plan_id}")
         plan_response = (
             safe_api_call(
                 "Backup",
@@ -692,7 +712,7 @@ def research_lambda(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         func_name = func["FunctionName"]
-        logger.info(f"Processing Lambda function: {func_name[:30]}...")
+        logger.debug(f"Processing Lambda function: {func_name[:30]}...")
         invocations = get_cloudwatch_metric(
             cw_client,
             "AWS/Lambda",
@@ -751,7 +771,7 @@ def research_opensearch(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         domain_name = domain["DomainName"]
-        logger.info(f"Processing OpenSearch domain: {domain_name[:30]}...")
+        logger.debug(f"Processing OpenSearch domain: {domain_name[:30]}...")
         detail = {"domain_name": domain_name, "estimated_savings": 0, "recommendations": []}
         detail["recommendations"].append(
             {
@@ -789,7 +809,7 @@ def research_cloudformation(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         stack_name = stack_item["StackName"]
-        logger.info(f"Processing CloudFormation stack: {stack_name[:30]}...")
+        logger.debug(f"Processing CloudFormation stack: {stack_name[:30]}...")
         resources = paginated_api_call(
             "CloudFormation",
             client,
@@ -845,7 +865,7 @@ def research_ecs(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         cluster_name = cluster_arn.split("/")[-1]
-        logger.info(f"Processing ECS cluster: {cluster_name[:30]}...")
+        logger.debug(f"Processing ECS cluster: {cluster_name[:30]}...")
         cluster = safe_api_call("ECS", client.describe_clusters, clusters=[cluster_arn])
         if "error" in cluster:
             continue
@@ -904,7 +924,7 @@ def research_appstream(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         fleet_name = fleet["Name"]
-        logger.info(f"Processing AppStream fleet: {fleet_name[:30]}...")
+        logger.debug(f"Processing AppStream fleet: {fleet_name[:30]}...")
         detail = {
             "fleet_name": fleet_name,
             "state": fleet.get("State", "N/A"),
@@ -945,7 +965,7 @@ def research_directory_service(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         dir_id = directory["DirectoryId"]
-        logger.info(f"Processing Directory: {dir_id}")
+        logger.debug(f"Processing Directory: {dir_id}")
         detail = {
             "directory_id": dir_id,
             "name": directory.get("Name", "N/A"),
@@ -987,7 +1007,7 @@ def research_ebs(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         volume_id = volume["VolumeId"]
-        logger.info(f"Processing EBS volume: {volume_id}")
+        logger.debug(f"Processing EBS volume: {volume_id}")
         attachments = volume.get("Attachments", [])
         read_ops = get_cloudwatch_metric(
             cw_client,
@@ -1097,7 +1117,7 @@ def research_efs(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         fs_id = fs["FileSystemId"]
-        logger.info(f"Processing EFS file system: {fs_id}")
+        logger.debug(f"Processing EFS file system: {fs_id}")
         lifecycle = safe_api_call("EFS", client.describe_lifecycle_configuration, FileSystemId=fs_id)
         policies = lifecycle.get("LifecyclePolicies", [])
         has_ia_or_archive_transition = (
@@ -1149,7 +1169,7 @@ def research_kinesis(client, skip_metrics=False):
     for stream in streams:
         if shutdown_event.is_set():
             break
-        logger.info(f"Processing Kinesis stream: {stream[:30]}...")
+        logger.debug(f"Processing Kinesis stream: {stream[:30]}...")
         summary_response = safe_api_call("Kinesis", client.describe_stream_summary, StreamName=stream)
         summary = summary_response.get("StreamDescriptionSummary", {}) if isinstance(summary_response, dict) else {}
         detail = {
@@ -1202,7 +1222,7 @@ def research_ses(client, skip_metrics=False):
     for identity in identities:
         if shutdown_event.is_set():
             break
-        logger.info("Processing SES identity")  # Don't log email addresses
+        logger.debug("Processing SES identity")  # Don't log email addresses
         verification_status = verification.get(identity, {}).get("VerificationStatus", "Unknown")
         detail = {
             "identity": identity,
@@ -1247,7 +1267,7 @@ def research_waf(client, skip_metrics=False):
             break
         acl_id = acl["Id"]
         acl_arn = acl.get("ARN", "")
-        logger.info(f"Processing WAFv2 Web ACL: {acl_id}")
+        logger.debug(f"Processing WAFv2 Web ACL: {acl_id}")
         logging_response = safe_api_call(
             "WAF",
             client.get_logging_configuration,
@@ -1300,7 +1320,7 @@ def research_kms(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         key_id = key["KeyId"]
-        logger.info(f"Processing KMS key: {key_id}")
+        logger.debug(f"Processing KMS key: {key_id}")
         metadata_response = safe_api_call("KMS", client.describe_key, KeyId=key_id)
         metadata = metadata_response.get("KeyMetadata", {}) if isinstance(metadata_response, dict) else {}
         eligible_for_rotation = (
@@ -1359,7 +1379,7 @@ def research_elb(client, elbv2_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         lb_name = lb["LoadBalancerName"]
-        logger.info(f"Processing Classic Load Balancer: {lb_name[:30]}...")
+        logger.debug(f"Processing Classic Load Balancer: {lb_name[:30]}...")
         detail = {
             "load_balancer_name": lb_name,
             "type": "classic",
@@ -1378,7 +1398,7 @@ def research_elb(client, elbv2_client, skip_metrics=False):
             break
         lb_name = lb["LoadBalancerName"]
         lb_arn = lb["LoadBalancerArn"]
-        logger.info(f"Processing ELBv2 load balancer: {lb_name[:30]}...")
+        logger.debug(f"Processing ELBv2 load balancer: {lb_name[:30]}...")
         attributes_response = safe_api_call(
             "ELBv2",
             elbv2_client.describe_load_balancer_attributes,
@@ -1439,7 +1459,7 @@ def research_guardduty(client, skip_metrics=False):
     for detector in detectors:
         if shutdown_event.is_set():
             break
-        logger.info(f"Processing GuardDuty detector: {detector}")
+        logger.debug(f"Processing GuardDuty detector: {detector}")
         detector_response = safe_api_call("GuardDuty", client.get_detector, DetectorId=detector)
         detector_status = detector_response.get("Status", "Unknown")
         detail = {"detector_id": detector, "status": detector_status, "estimated_savings": 0, "recommendations": []}
@@ -1478,7 +1498,7 @@ def research_iam(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         policy_name = policy["PolicyName"]
-        logger.info(f"Processing IAM policy: {policy_name[:30]}...")
+        logger.debug(f"Processing IAM policy: {policy_name[:30]}...")
         policy_doc = safe_api_call(
             "IAM", client.get_policy_version, PolicyArn=policy["Arn"], VersionId=policy["DefaultVersionId"]
         )
@@ -1580,7 +1600,7 @@ def research_firewall_manager(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         policy_id = policy["PolicyId"]
-        logger.info(f"Processing Firewall Manager policy: {policy_id}")
+        logger.debug(f"Processing Firewall Manager policy: {policy_id}")
         detail = {
             "policy_id": policy_id,
             "name": policy.get("PolicyName", "N/A"),
@@ -1638,7 +1658,7 @@ def research_ec2(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         instance_id = instance["InstanceId"]
-        logger.info(f"Processing EC2 instance: {instance_id}")
+        logger.debug(f"Processing EC2 instance: {instance_id}")
         state = instance.get("State", {}).get("Name", "N/A")
         cpu = (
             get_cloudwatch_metric(
@@ -1800,7 +1820,7 @@ def research_cloudtrail(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         trail_name = trail["Name"]
-        logger.info(f"Processing CloudTrail trail: {trail_name[:30]}...")
+        logger.debug(f"Processing CloudTrail trail: {trail_name[:30]}...")
 
         # Fetch actual logging status via get_trail_status
         is_logging = None
@@ -1850,7 +1870,7 @@ def research_cloudwatch(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         alarm_name = alarm["AlarmName"]
-        logger.info(f"Processing CloudWatch alarm: {alarm_name[:30]}...")
+        logger.debug(f"Processing CloudWatch alarm: {alarm_name[:30]}...")
 
         # Use the StateValue from the alarm object directly (not a nonexistent metric)
         state_value = alarm.get("StateValue", "OK")
@@ -1890,7 +1910,7 @@ def research_rds(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         instance_id = instance["DBInstanceIdentifier"]
-        logger.info(f"Processing RDS instance: {instance_id[:30]}...")
+        logger.debug(f"Processing RDS instance: {instance_id[:30]}...")
         cpu = get_cloudwatch_metric(
             cw_client,
             "AWS/RDS",
@@ -1966,7 +1986,7 @@ def research_codecommit(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         repo_name = repo["repositoryName"]
-        logger.info(f"Processing CodeCommit repository: {repo_name[:30]}...")
+        logger.debug(f"Processing CodeCommit repository: {repo_name[:30]}...")
         metadata_response = safe_api_call("CodeCommit", client.get_repository, repositoryName=repo_name)
         metadata = metadata_response.get("repositoryMetadata", {}) if isinstance(metadata_response, dict) else {}
         last_modified = metadata.get("lastModifiedDate")
@@ -2015,7 +2035,7 @@ def research_ecr(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         repo_name = repo["repositoryName"]
-        logger.info(f"Processing ECR repository: {repo_name[:30]}...")
+        logger.debug(f"Processing ECR repository: {repo_name[:30]}...")
         lifecycle = safe_api_call(
             "ECR",
             client.get_lifecycle_policy,
@@ -2077,7 +2097,7 @@ def research_trusted_advisor(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         check_id = check["id"]
-        logger.info(f"Processing Trusted Advisor check: {check['name'][:30]}...")
+        logger.debug(f"Processing Trusted Advisor check: {check['name'][:30]}...")
         result = safe_api_call("Trusted Advisor", client.describe_trusted_advisor_check_result, checkId=check_id)
         recommendations = []
         if isinstance(result, dict) and "result" in result:

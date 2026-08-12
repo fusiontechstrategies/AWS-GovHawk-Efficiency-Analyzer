@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import ClientError
 from botocore.stub import Stubber
 
 import AWS_GovCloud_Analyzer as analyzer
@@ -68,6 +69,37 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             analyzer.validate_region("us-east-1")
 
+    def test_repository_contains_no_em_dash_characters(self):
+        project_root = Path(__file__).resolve().parent.parent
+        excluded_parts = {".git", ".mypy_cache", ".ruff_cache", ".venv", "output", "tmp", "venv"}
+        text_suffixes = {".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml"}
+        extensionless_text_files = {".editorconfig", ".gitattributes", ".gitignore", "LICENSE"}
+
+        for path in project_root.rglob("*"):
+            if not path.is_file() or excluded_parts.intersection(path.parts):
+                continue
+            if path.suffix not in text_suffixes and path.name not in extensionless_text_files:
+                continue
+            content = path.read_text(encoding="utf-8")
+            self.assertNotIn("\u2014", content, str(path.relative_to(project_root)))
+
+    def test_client_errors_redact_account_and_access_key_ids(self):
+        synthetic_access_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        error = ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": f"Account 123456789012 denied for {synthetic_access_key}",
+                }
+            },
+            "TestOperation",
+        )
+        message = analyzer.sanitize_error_message(error)
+        self.assertEqual(
+            message,
+            "AccessDeniedException: Account [ACCOUNT_ID] denied for [ACCESS_KEY_ID]",
+        )
+
     def test_resolve_services_is_flexible_and_deduplicates(self):
         self.assertEqual(
             analyzer.resolve_services(["s3,ec2", "security", "hub", "S3"]),
@@ -94,6 +126,40 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIsNone(metric["average"])
         self.assertEqual(metric["status"], "skipped")
         self.assertFalse(analyzer.metric_is_below(metric, 1))
+
+    def test_s3_analyzes_only_buckets_in_the_selected_region(self):
+        buckets = [{"Name": "west-bucket"}, {"Name": "east-bucket"}]
+
+        def bucket_location(kwargs):
+            return {"LocationConstraint": "us-gov-west-1" if kwargs["Bucket"] == "west-bucket" else "us-gov-east-1"}
+
+        client = FakeClient(
+            "list_buckets",
+            [{"Buckets": buckets}],
+            {
+                "get_bucket_location": bucket_location,
+                "get_bucket_lifecycle_configuration": {"Rules": []},
+                "get_bucket_policy_status": {"PolicyStatus": {"IsPublic": False}},
+                "get_bucket_acl": {"Grants": []},
+                "get_public_access_block": {
+                    "PublicAccessBlockConfiguration": {
+                        "BlockPublicAcls": True,
+                        "IgnorePublicAcls": True,
+                        "BlockPublicPolicy": True,
+                        "RestrictPublicBuckets": True,
+                    }
+                },
+                "get_bucket_encryption": {
+                    "ServerSideEncryptionConfiguration": {
+                        "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
+                    }
+                },
+            },
+        )
+        result = analyzer.research_s3(client, object(), skip_metrics=True)
+        self.assertEqual(result["partition_bucket_count"], 2)
+        self.assertEqual(result["bucket_count"], 1)
+        self.assertEqual(result["bucket_details"][0]["bucket_name"], "west-bucket")
 
     def test_lambda_skip_metrics_does_not_create_low_usage_finding(self):
         client = FakeClient(

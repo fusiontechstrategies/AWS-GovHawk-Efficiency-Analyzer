@@ -30,6 +30,8 @@ All notable changes to GovHawk are documented here.
 - Offline unit/API-model tests for all 29 service entry points.
 - Public-repository documentation, security guidance, CI, dependency updates,
   and report-focused ignore rules.
+- Apache License 2.0, explicit IAM permission guidance, repository ownership
+  rules, dependency auditing, security linting, and expanded Python CI coverage.
 
 ## [1.0.0] - 2026-04-07
 

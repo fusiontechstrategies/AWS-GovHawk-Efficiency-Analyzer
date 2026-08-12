@@ -8,9 +8,10 @@ Security fixes are applied to the latest released version of GovHawk.
 
 Do not open a public issue containing a vulnerability, AWS account data,
 resource identifiers, credentials, report output, or classified information.
-Use GitHub's private vulnerability reporting feature after it is enabled for the
-repository. If that feature is unavailable, contact the repository owner through
-an established private channel without attaching sensitive environment data.
+Use GitHub's private vulnerability reporting feature from the repository's
+Security tab. If that feature is unavailable, contact the repository owner
+through an established private channel without attaching sensitive environment
+data.
 
 Include a minimal synthetic reproduction, affected version, impact, and proposed
 mitigation when possible.

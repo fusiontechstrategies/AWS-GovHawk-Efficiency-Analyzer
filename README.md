@@ -3,6 +3,7 @@
 [![CI](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)
 ![AWS GovCloud](https://img.shields.io/badge/AWS-GovCloud-FF9900)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 > One file. One command. A clearer view of potential waste, security blind
 > spots, and operational risk across 29 AWS GovCloud services.
@@ -67,6 +68,10 @@ and [Inspector migration notice](https://docs.aws.amazon.com/inspector/v1/usergu
 - Network access to the relevant GovCloud service endpoints
 - Permissions for the list, describe, get, and CloudWatch metric operations used
   by the selected services
+
+See [IAM_PERMISSIONS.md](IAM_PERMISSIONS.md) for the exact API operations and a
+reviewable starter policy. Tailor that policy to your account boundaries and
+organization controls before use.
 
 Trusted Advisor API access depends on the account's support plan. Optional
 CloudWatch logging additionally requires `logs:CreateLogGroup`,
@@ -157,6 +162,8 @@ and region before using a command.
 Metrics use a configurable observation window and distinguish skipped or missing
 data from a real zero. Rightsizing recommendations require actual samples, and
 their wording calls for memory, network, storage, peak, and workload review.
+S3 discovery is partition-wide, but GovHawk verifies each bucket location and
+includes only buckets in the selected region.
 
 ## Development
 
@@ -166,7 +173,10 @@ Install development tools and run the checks:
 python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 ruff check AWS_GovCloud_Analyzer.py tests
+ruff format --check AWS_GovCloud_Analyzer.py tests
 mypy AWS_GovCloud_Analyzer.py --ignore-missing-imports
+bandit -q -r AWS_GovCloud_Analyzer.py
+pip-audit -r requirements.txt
 ```
 
 The tests validate argument handling, pagination, missing-metric behavior, EC2
@@ -183,6 +193,11 @@ service entry points against botocore's current API models without contacting AW
 - Live-account behavior still depends on permissions, enabled services, support
   plan, service quotas, and the size of the environment.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
-[PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md) before publishing or
-accepting contributions.
+## License
+
+GovHawk is licensed under the [Apache License 2.0](LICENSE).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
+[SUPPORT.md](SUPPORT.md), [SECURITY.md](SECURITY.md), and
+[PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md) before accepting
+contributions or creating a tagged release.

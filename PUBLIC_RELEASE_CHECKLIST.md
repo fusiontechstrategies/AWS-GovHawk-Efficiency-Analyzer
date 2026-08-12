@@ -1,25 +1,30 @@
 # Public Release Checklist
 
-Complete these items before making the repository public.
+Completed items reflect the public-source review on August 12, 2026. Remaining
+items apply before creating the first tagged release.
 
-- [ ] Choose and add a license. No open-source license has been selected yet.
-- [ ] Confirm the repository owner, copyright holder, project name, and public
-      contact channels.
-- [ ] Enable GitHub private vulnerability reporting.
-- [ ] Review all files and Git history for credentials, account IDs, resource
+- [x] Add the Apache License 2.0.
+- [x] Confirm the repository owner, project name, GitHub issues, and private
+      vulnerability-reporting channels.
+- [x] Enable GitHub private vulnerability reporting.
+- [x] Review all files and Git history for credentials, account IDs, resource
       names, reports, screenshots, organization branding, CUI, and other
       controlled or proprietary information.
-- [ ] Run a secret scanner against the working tree and full Git history.
-- [ ] Run the unit tests, Ruff, and mypy from a clean virtual environment.
-- [ ] Test a least-privilege run in both `us-gov-west-1` and `us-gov-east-1`
-      using non-production accounts or approved environments.
-- [ ] Review generated PDF and JSON outputs for expected redaction, banner,
-      classification, permissions, and retention behavior.
-- [ ] Confirm every AWS API and required permission in the README.
-- [ ] Confirm optional CloudWatch logging has an approved destination and
-      retention policy before demonstrating it with real data.
-- [ ] Create the initial release tag only after the live-environment validation
-      and license decision are complete.
+- [x] Run Gitleaks against the working tree and full Git history.
+- [x] Run tests, Ruff, mypy, Bandit, and pip-audit from a clean Python 3.12
+      virtual environment.
+- [x] Run read-only validation in both `us-gov-west-1` and `us-gov-east-1`
+      using approved credentials, with metrics and CloudWatch logging disabled.
+- [x] Review synthetic PDF layout and validate live PDF and JSON structure,
+      error redaction, banner behavior, and output cleanup.
+- [x] Document every AWS API permission in `IAM_PERMISSIONS.md`.
+- [x] Keep optional CloudWatch logging disabled during live validation.
+- [ ] Validate the documented starter IAM policy in an approved non-production
+      account before creating the first tagged release.
+- [ ] Approve a CloudWatch Logs destination, encryption, access, and retention
+      policy before demonstrating optional logging with real data.
+- [ ] Create the initial release tag after the remaining tagged-release gates
+      are complete.
 
 Do not add a real report or organization seal as a sample artifact. Use synthetic
 screenshots or fixtures if public examples are needed.

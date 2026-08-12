@@ -32,6 +32,7 @@ All notable changes to GovHawk are documented here.
   and report-focused ignore rules.
 - Apache License 2.0, explicit IAM permission guidance, repository ownership
   rules, dependency auditing, security linting, and expanded Python CI coverage.
+- Current boto3, botocore, ReportLab, mypy, and Ruff dependency baselines.
 
 ## [1.0.0] - 2026-04-07
 

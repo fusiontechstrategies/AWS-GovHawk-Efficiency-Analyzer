@@ -193,11 +193,6 @@ service entry points against botocore's current API models without contacting AW
 - Live-account behavior still depends on permissions, enabled services, support
   plan, service quotas, and the size of the environment.
 
-## Federal cybersecurity discussion
-
-For practitioner discussion about federal cloud, control effectiveness, evidence, incident response, and mission resilience, visit [r/FederalCyber](https://www.reddit.com/r/FederalCyber/).
-
-It is an independent, unofficial community for public-source discussion. Never post CUI, credentials, customer details, active incident data, or nonpublic vulnerabilities.
 
 ## License
 

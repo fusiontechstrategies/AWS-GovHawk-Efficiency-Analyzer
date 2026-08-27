@@ -75,3 +75,6 @@ jobs:
 
       - name: Audit runtime dependencies
         run: pip-audit -r requirements.txt
+
+      - name: Audit development dependencies
+        run: pip-audit -r requirements-dev.txt

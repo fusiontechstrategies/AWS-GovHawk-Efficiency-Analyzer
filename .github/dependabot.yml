@@ -6,8 +6,16 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      aws-sdk-runtime-dependencies:
+        dependency-type: production
+        patterns:
+          - boto3
+          - botocore
       python-development-dependencies:
         dependency-type: development
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
@@ -18,3 +26,6 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch

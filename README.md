@@ -41,6 +41,12 @@ continuous-integration support.
 - GovHawk is an independent project. It is not affiliated with or endorsed by
   Amazon Web Services or the United States Government.
 
+Version 2.0.0 is the current release candidate. No tag or GitHub release exists
+yet. Until the tested standalone runtime, deterministic ZIP, SPDX SBOM,
+checksums, release evidence, and provenance are available together, evaluate
+the protected repository source rather than a similarly named download. See
+[RELEASING.md](RELEASING.md) for the exact gates.
+
 GovCloud billing data is available through the associated standard AWS account,
 not GovCloud credentials, so this tool deliberately does not query Cost Explorer
 or invent dollar savings. CloudFront is also not available inside the GovCloud
@@ -79,7 +85,7 @@ CloudWatch logging additionally requires `logs:CreateLogGroup`,
 
 ## Install
 
-Create and activate a virtual environment, then install the runtime dependencies:
+Create and activate a virtual environment, then install the exact runtime dependencies:
 
 ```powershell
 python -m venv .venv
@@ -135,7 +141,11 @@ List supported services or display all options:
 ```powershell
 python AWS_GovCloud_Analyzer.py --list-services
 python AWS_GovCloud_Analyzer.py --help
+python AWS_GovCloud_Analyzer.py --version
 ```
+
+The list, help, and version commands do not contact AWS and are the safest first
+checks before configuring an authorized account path.
 
 ## Output and data handling
 
@@ -172,16 +182,23 @@ Install development tools and run the checks:
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
-ruff check AWS_GovCloud_Analyzer.py tests
-ruff format --check AWS_GovCloud_Analyzer.py tests
+ruff check AWS_GovCloud_Analyzer.py scripts tests
+ruff format --check AWS_GovCloud_Analyzer.py scripts tests
 mypy AWS_GovCloud_Analyzer.py --ignore-missing-imports
-bandit -q -r AWS_GovCloud_Analyzer.py
+bandit -q -r AWS_GovCloud_Analyzer.py scripts
 pip-audit -r requirements.txt
 ```
 
 The tests validate argument handling, pagination, missing-metric behavior, EC2
 root-volume encryption logic, IAM policy heuristics, PDF generation, and all 29
 service entry points against botocore's current API models without contacting AWS.
+
+The 2.0.0 release path builds the exact standalone runtime, deterministic source
+and documentation ZIP, SPDX 2.3 dependency SBOM, SHA-256 checksums, and
+commit-bound evidence twice and requires identical bytes. A tag pointing to a
+verified protected-main commit can create only a draft release. The first tag
+also remains blocked on the live controls in
+[PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md).
 
 ## Current limitations
 
@@ -193,7 +210,6 @@ service entry points against botocore's current API models without contacting AW
 - Live-account behavior still depends on permissions, enabled services, support
   plan, service quotas, and the size of the environment.
 
-
 ## License
 
 GovHawk is licensed under the [Apache License 2.0](LICENSE).
@@ -201,4 +217,5 @@ GovHawk is licensed under the [Apache License 2.0](LICENSE).
 See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
 [SUPPORT.md](SUPPORT.md), [SECURITY.md](SECURITY.md), and
 [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md) before accepting
-contributions or creating a tagged release.
+contributions or creating a tagged release. Release validation details are in
+[TESTING.md](TESTING.md) and [RELEASING.md](RELEASING.md).

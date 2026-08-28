@@ -106,6 +106,8 @@ jobs:
         run: echo "value=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build exact candidate twice
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.build-epoch.outputs.value }}
         shell: bash
         run: |
           set -euo pipefail
@@ -113,13 +115,13 @@ jobs:
             --version 2.0.0 \
             --tag v2.0.0 \
             --source-commit "$GITHUB_SHA" \
-            --source-date-epoch "${{ steps.build-epoch.outputs.value }}" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
             --output-directory release-candidate
           python scripts/prepare_release.py \
             --version 2.0.0 \
             --tag v2.0.0 \
             --source-commit "$GITHUB_SHA" \
-            --source-date-epoch "${{ steps.build-epoch.outputs.value }}" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH" \
             --output-directory repeat-release-candidate
           test "$(find release-candidate -maxdepth 1 -type f -printf '%f\n' | sort)" = \
             "$(find repeat-release-candidate -maxdepth 1 -type f -printf '%f\n' | sort)"

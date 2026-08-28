@@ -1,4 +1,4 @@
-## Summary
+# Summary
 
 Describe the user-visible behavior changed and why.
 

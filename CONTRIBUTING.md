@@ -21,12 +21,18 @@ the project owner explicitly changes this constraint.
 
    ```text
    python -m unittest discover -s tests -v
-   ruff check AWS_GovCloud_Analyzer.py tests
-   ruff format --check AWS_GovCloud_Analyzer.py tests
+   ruff check AWS_GovCloud_Analyzer.py scripts tests
+   ruff format --check AWS_GovCloud_Analyzer.py scripts tests
    mypy AWS_GovCloud_Analyzer.py --ignore-missing-imports
-   bandit -q -r AWS_GovCloud_Analyzer.py
+   bandit -q -r AWS_GovCloud_Analyzer.py scripts
    pip-audit -r requirements.txt
+   pip-audit -r requirements-dev.txt
    ```
+
+   Changes to version identity, dependencies, release controls, or bundled
+   files also require two exact five-asset builds with identical bytes and the
+   complete [RELEASING.md](RELEASING.md) review. Never reuse a published
+   version for different bytes.
 
 5. Render a representative PDF when report code changes and visually inspect
    every page for clipping, overlap, unreadable tables, and broken characters.

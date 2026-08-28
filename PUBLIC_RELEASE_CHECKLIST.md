@@ -19,6 +19,12 @@ items apply before creating the first tagged release.
       error redaction, banner behavior, and output cleanup.
 - [x] Document every AWS API permission in `IAM_PERMISSIONS.md`.
 - [x] Keep optional CloudWatch logging disabled during live validation.
+- [x] Pin the three direct runtime dependencies and add deterministic
+      standalone, source ZIP, SPDX 2.3, checksum, and commit-evidence assets.
+- [x] Add exact five-asset enforcement, repeat-build comparison, GitHub
+      provenance, and a tag-only workflow that can create only a draft.
+- [x] Pass offline release-asset tests without using AWS credentials or live
+      account data.
 - [ ] Validate the documented starter IAM policy in an approved non-production
       account before creating the first tagged release.
 - [ ] Approve a CloudWatch Logs destination, encryption, access, and retention

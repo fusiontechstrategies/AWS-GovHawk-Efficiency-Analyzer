@@ -45,6 +45,32 @@ class ReleaseAssetTests(unittest.TestCase):
                 self.assertTrue(all(member.create_system == 3 for member in members))
                 self.assertTrue(all(stat.S_IMODE(member.external_attr >> 16) == 0o644 for member in members))
 
+    def test_source_zip_rebuilds_the_exact_release_assets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = self.prepare(root, "original")
+            original_by_name = {path.name: path.read_bytes() for path in original}
+            zip_name = f"AWS-GovHawk-Efficiency-Analyzer-v{VERSION}.zip"
+            extracted = root / "extracted"
+
+            with zipfile.ZipFile(root / "original" / zip_name) as archive:
+                member_names = archive.namelist()
+                archive.extractall(extracted)
+
+            prefix = f"AWS-GovHawk-Efficiency-Analyzer-v{VERSION}"
+            self.assertIn(f"{prefix}/.github/release-notes/{TAG}.md", member_names)
+            self.assertIn(f"{prefix}/.github/workflows/release.yml", member_names)
+
+            rebuilt = prepare_release.prepare_release(
+                extracted / prefix,
+                root / "rebuilt",
+                VERSION,
+                TAG,
+                SOURCE_COMMIT,
+                SOURCE_DATE_EPOCH,
+            )
+            self.assertEqual(original_by_name, {path.name: path.read_bytes() for path in rebuilt})
+
     def test_assets_bind_source_dependencies_checksums_and_members(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

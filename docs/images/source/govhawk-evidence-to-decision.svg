@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">GovHawk evidence to decision workflow</title>
+  <desc id="desc">A spacious synthetic example showing inventory, evidence status, conservative recommendation, and human review without automatic changes.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#081a2d"/><stop offset="1" stop-color="#132c45"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#020817" flood-opacity=".4"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#65d8ff"/></marker>
+  </defs>
+  <rect width="1200" height="760" fill="url(#bg)"/>
+  <circle cx="1100" cy="22" r="220" fill="#1e425e" opacity=".55"/>
+  <text x="70" y="67" fill="#65d8ff" font-family="Segoe UI,Arial,sans-serif" font-size="18" font-weight="700" letter-spacing="3">GOVHAWK</text>
+  <text x="70" y="120" fill="#fff" font-family="Segoe UI,Arial,sans-serif" font-size="42" font-weight="750">Savings need evidence, not guesses.</text>
+  <text x="70" y="158" fill="#bad6e9" font-family="Segoe UI,Arial,sans-serif" font-size="20">A synthetic GovCloud review from inventory to an accountable decision</text>
+  <g filter="url(#shadow)" font-family="Segoe UI,Arial,sans-serif">
+    <rect x="70" y="202" width="1060" height="94" rx="18" fill="#142f49" stroke="#3e7d9f" stroke-width="2"/>
+    <text x="100" y="234" fill="#65d8ff" font-size="14" font-weight="700" letter-spacing="1.4">SYNTHETIC INVENTORY</text>
+    <text x="100" y="267" fill="#fff" font-size="24" font-weight="700">EC2 development instance  |  us-gov-west-1  |  review only</text>
+    <rect x="900" y="224" width="200" height="45" rx="22" fill="#163d3a" stroke="#4bd2ad"/>
+    <text x="1000" y="252" text-anchor="middle" fill="#7df1cf" font-size="14" font-weight="700">NO REMEDIATION RUN</text>
+  </g>
+  <g filter="url(#shadow)" font-family="Segoe UI,Arial,sans-serif">
+    <rect x="70" y="344" width="320" height="242" rx="20" fill="#132d43" stroke="#3d7e9f" stroke-width="2"/>
+    <text x="100" y="380" fill="#65d8ff" font-size="14" font-weight="700" letter-spacing="1.4">1  OBSERVED EVIDENCE</text>
+    <text x="100" y="421" fill="#fff" font-size="25" font-weight="700">Metrics have samples</text>
+    <circle cx="113" cy="462" r="8" fill="#4bd2ad"/><text x="135" y="468" fill="#c7dfec" font-size="16">CPU data available</text>
+    <circle cx="113" cy="500" r="8" fill="#4bd2ad"/><text x="135" y="506" fill="#c7dfec" font-size="16">Observation window recorded</text>
+    <circle cx="113" cy="538" r="8" fill="#ffd066"/><text x="135" y="544" fill="#ecdbaa" font-size="16">Memory data not collected</text>
+
+    <rect x="440" y="344" width="320" height="242" rx="20" fill="#282c37" stroke="#bd8d2d" stroke-width="2"/>
+    <text x="470" y="380" fill="#ffd066" font-size="14" font-weight="700" letter-spacing="1.4">2  CONSERVATIVE FINDING</text>
+    <text x="470" y="421" fill="#fff" font-size="25" font-weight="700">Review utilization</text>
+    <text x="470" y="462" fill="#e4d6b6" font-size="16">The evidence supports a review.</text>
+    <text x="470" y="492" fill="#e4d6b6" font-size="16">It does not support a promised</text>
+    <text x="470" y="522" fill="#e4d6b6" font-size="16">savings amount or an automatic</text>
+    <text x="470" y="552" fill="#e4d6b6" font-size="16">instance-size change.</text>
+
+    <rect x="810" y="344" width="320" height="242" rx="20" fill="#173739" stroke="#45bc9e" stroke-width="2"/>
+    <text x="840" y="380" fill="#75ebcb" font-size="14" font-weight="700" letter-spacing="1.4">3  HUMAN DECISION</text>
+    <text x="840" y="421" fill="#fff" font-size="25" font-weight="700">Validate before change</text>
+    <text x="840" y="462" fill="#c3e6dc" font-size="16">Check memory, network, storage,</text>
+    <text x="840" y="492" fill="#c3e6dc" font-size="16">peak demand, dependencies,</text>
+    <text x="840" y="522" fill="#c3e6dc" font-size="16">rollback readiness, and approval.</text>
+    <rect x="840" y="544" width="250" height="34" rx="17" fill="#102b2e" stroke="#5bd6b5"/>
+    <text x="965" y="566" text-anchor="middle" fill="#8bf4d5" font-size="13" font-weight="700">RECOMMENDATION, NOT ACTION</text>
+  </g>
+  <path d="M390 465 H425" stroke="#65d8ff" stroke-width="4" marker-end="url(#arrow)"/><path d="M760 465 H795" stroke="#65d8ff" stroke-width="4" marker-end="url(#arrow)"/>
+  <g font-family="Segoe UI,Arial,sans-serif">
+    <rect x="70" y="632" width="1060" height="62" rx="16" fill="#0d2033" stroke="#4d7693"/>
+    <text x="100" y="658" fill="#65d8ff" font-size="13" font-weight="700" letter-spacing="1.2">REPORT BOUNDARY</text>
+    <text x="100" y="680" fill="#d5e6f1" font-size="15">Missing data stays missing. Zero usage is reported only when the evidence actually says zero.</text>
+    <text x="1100" y="672" text-anchor="end" fill="#86a9bf" font-size="12">synthetic example</text>
+  </g>
+  <text x="70" y="728" fill="#7ea7c2" font-family="Segoe UI,Arial,sans-serif" font-size="13">No account identifiers, live resources, or claimed dollar savings are shown.</text>
+</svg>

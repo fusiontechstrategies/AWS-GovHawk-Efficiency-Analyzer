@@ -13,6 +13,8 @@ JSON report, or both. It collects resource counts, selected CloudWatch metrics,
 configuration signals, and conservative recommendations without automatically
 changing the environment.
 
+[![GovHawk evidence to decision example](docs/images/govhawk-evidence-to-decision.png)](docs/images/source/govhawk-evidence-to-decision.svg)
+
 The executable remains one file: `AWS_GovCloud_Analyzer.py`. The other files in
 this repository provide documentation, tests, dependency declarations, and
 continuous-integration support.

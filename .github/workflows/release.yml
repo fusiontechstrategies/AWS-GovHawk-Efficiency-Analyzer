@@ -171,7 +171,7 @@ jobs:
       - name: Verify bytes before attestation
         env:
           EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
-        run: python verifier/scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
+        run: python -I verifier/scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
 
       - name: Attest every release asset
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -209,8 +209,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
-          python scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
+          python -I scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
+          python -I scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
@@ -223,7 +223,7 @@ jobs:
             "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.spdx.json" \
             "release-assets/SHA256SUMS.txt" \
             "release-assets/release-evidence.json"
-          if ! python scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"; then
+          if ! python -I scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"; then
             gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
             exit 1
           fi
@@ -237,13 +237,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
+          python -I scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir readback-assets
-          python scripts/verify_release_integrity.py assets readback-assets "$EXPECTED_MANIFEST"
+          python -I scripts/verify_release_integrity.py assets readback-assets "$EXPECTED_MANIFEST"
           gh release view "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --json isDraft,isPrerelease,assets > release-state.json
-          python - "$RELEASE_VERSION" <<'PY'
+          python -I - "$RELEASE_VERSION" <<'PY'
           import json
           import sys
 

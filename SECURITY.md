@@ -32,8 +32,11 @@ Each invocation removes and closes its CloudWatch handler, including failed or
 interrupted runs. A later invocation must opt in separately.
 
 Reports are written through exclusive regular-file descriptors in a private
-staging directory. POSIX reports have mode 0600 before content is written. On
-Windows, an owner-only NTFS ACL is established before creating the report file.
+staging directory. POSIX reports have mode 0600 before content is written, and
+publication and cleanup use pinned directory descriptors even if an ancestor
+is replaced. On Windows, the staging directory is created with an owner-only
+protected NTFS DACL in its creation-time security descriptor. There is no
+intermediate inherited-ACL directory before protection is applied.
 The parent and staging directory are held through non-reparse Win32 handles
 without delete sharing. The staging DACL is applied to the open handle, and the
 report remains open through hard-link publication so pathname replacement cannot
@@ -41,3 +44,21 @@ redirect a sensitive write. A conflicting directory handle aborts generation.
 Protection setup failure aborts generation. Existing final entries, including
 links, are never overwritten. POSIX output parents must belong to the current
 user and must not be writable by other users.
+
+## Collection limits and incomplete coverage
+
+Each AWS service is limited to 1,000 operation calls, 2,000 list entries,
+4 MiB of retained response data, and 300 seconds of collection time. A whole
+run is limited to 12,000 calls, 30,000 entries, 32 MiB, and 900 seconds.
+Calls already in progress remain subject to configured SDK timeouts and retries;
+these are collection budgets, not hard process termination deadlines. Limits
+stop further calls and reject oversized responses. A budget-limited run marks
+JSON coverage incomplete, adds a PDF warning, and exits with code 3. Missing
+inventory must not be interpreted as evidence that resources are absent or safe.
+Use separately scoped runs for large environments.
+
+SES remediation is emitted as an argument list, not a portable shell command.
+Keep identity values as data when using an SDK or an approved command runner.
+Release jobs invoke verifiers in Python isolated mode so tagged modules cannot
+shadow standard-library imports. Signed source review and release environment
+controls remain necessary to authorize the verifier code itself.

@@ -17,6 +17,7 @@ guaranteed savings forecast.
 import argparse
 import csv
 import datetime
+import errno
 import html
 import json
 import logging
@@ -309,6 +310,32 @@ def sanitize_error_message(error):
     return type(error).__name__
 
 
+class SensitiveDiagnosticFilter(logging.Filter):
+    """Remove structured identifiers and host paths before any handler sees them."""
+
+    def filter(self, record):
+        message = record.getMessage()
+        for pattern in (
+            r"arn:[^\s]+",
+            r"\b(?:vpc|subnet|i|vol|sg|fs|eni|vpce|acl|ami)-[A-Za-z0-9-]+",
+            r"\b\d{12}\b",
+            r"[A-Za-z]:[\\/][^\r\n]+",
+            r"\\\\[^\r\n]+",
+            r"(?<!\w)/[^\r\n]+",
+            r"\b[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        ):
+            message = re.sub(pattern, "[redacted]", message)
+        record.msg = message
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
+        return True
+
+
+logger.addFilter(SensitiveDiagnosticFilter())
+
+
 def validate_region(region):
     """Validate a current or future AWS GovCloud (US) region name."""
     if not re.fullmatch(r"us-gov-[a-z]+-\d+", region):
@@ -491,6 +518,7 @@ class JsonLogFormatter(logging.Formatter):
     """Small built-in JSON formatter used by the optional CloudWatch handler."""
 
     def format(self, record):
+        SensitiveDiagnosticFilter().filter(record)
         return json.dumps(
             {
                 "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
@@ -588,7 +616,7 @@ def research_s3(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         bucket_name = bucket["Name"]
-        logger.debug(f"Processing S3 bucket: {bucket_name[:20]}...")
+        logger.debug("Processing S3 bucket")
         location = safe_api_call("S3", client.get_bucket_location, Bucket=bucket_name)
         if "error" in location:
             bucket_region_unknown_count += 1
@@ -805,7 +833,7 @@ def research_vpc(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         vpc_id = vpc["VpcId"]
-        logger.debug(f"Processing VPC: {vpc_id}")
+        logger.debug("Processing VPC")
         subnets = paginated_api_call(
             "VPC",
             client,
@@ -888,7 +916,7 @@ def research_direct_connect(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         conn_id = conn["connectionId"]
-        logger.debug(f"Processing Direct Connect connection: {conn_id}")
+        logger.debug("Processing Direct Connect connection")
         detail = {
             "connection_id": conn_id,
             "state": conn.get("connectionState", "N/A"),
@@ -931,7 +959,7 @@ def research_backup(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         plan_id = plan["BackupPlanId"]
-        logger.debug(f"Processing Backup plan: {plan_id}")
+        logger.debug("Processing Backup plan")
         plan_response = (
             safe_api_call(
                 "Backup",
@@ -996,7 +1024,7 @@ def research_lambda(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         func_name = func["FunctionName"]
-        logger.debug(f"Processing Lambda function: {func_name[:30]}...")
+        logger.debug("Processing Lambda function")
         invocations = get_cloudwatch_metric(
             cw_client,
             "AWS/Lambda",
@@ -1056,7 +1084,7 @@ def research_opensearch(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         domain_name = domain["DomainName"]
-        logger.debug(f"Processing OpenSearch domain: {domain_name[:30]}...")
+        logger.debug("Processing OpenSearch domain")
         detail = {"domain_name": domain_name, "estimated_savings": 0, "recommendations": []}
         detail["recommendations"].append(
             {
@@ -1095,7 +1123,7 @@ def research_cloudformation(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         stack_name = stack_item["StackName"]
-        logger.debug(f"Processing CloudFormation stack: {stack_name[:30]}...")
+        logger.debug("Processing CloudFormation stack")
         resources = paginated_api_call(
             "CloudFormation",
             client,
@@ -1152,7 +1180,7 @@ def research_ecs(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         cluster_name = cluster_arn.split("/")[-1]
-        logger.debug(f"Processing ECS cluster: {cluster_name[:30]}...")
+        logger.debug("Processing ECS cluster")
         cluster = safe_api_call("ECS", client.describe_clusters, clusters=[cluster_arn])
         if "error" in cluster:
             continue
@@ -1226,7 +1254,7 @@ def research_appstream(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         fleet_name = fleet["Name"]
-        logger.debug(f"Processing AppStream fleet: {fleet_name[:30]}...")
+        logger.debug("Processing AppStream fleet")
         detail = {
             "fleet_name": fleet_name,
             "state": fleet.get("State", "N/A"),
@@ -1268,7 +1296,7 @@ def research_directory_service(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         dir_id = directory["DirectoryId"]
-        logger.debug(f"Processing Directory: {dir_id}")
+        logger.debug("Processing Directory")
         detail = {
             "directory_id": dir_id,
             "name": directory.get("Name", "N/A"),
@@ -1311,7 +1339,7 @@ def research_ebs(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         volume_id = volume["VolumeId"]
-        logger.debug(f"Processing EBS volume: {volume_id}")
+        logger.debug("Processing EBS volume")
         attachments = volume.get("Attachments", [])
         read_ops = get_cloudwatch_metric(
             cw_client,
@@ -1422,7 +1450,7 @@ def research_efs(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         fs_id = fs["FileSystemId"]
-        logger.debug(f"Processing EFS file system: {fs_id}")
+        logger.debug("Processing EFS file system")
         lifecycle = safe_api_call("EFS", client.describe_lifecycle_configuration, FileSystemId=fs_id)
         policies = lifecycle.get("LifecyclePolicies", [])
         has_ia_or_archive_transition = (
@@ -1475,7 +1503,7 @@ def research_kinesis(client, skip_metrics=False):
     for stream in streams:
         if shutdown_event.is_set():
             break
-        logger.debug(f"Processing Kinesis stream: {stream[:30]}...")
+        logger.debug("Processing Kinesis stream")
         summary_response = safe_api_call("Kinesis", client.describe_stream_summary, StreamName=stream)
         summary = summary_response.get("StreamDescriptionSummary", {}) if isinstance(summary_response, dict) else {}
         detail = {
@@ -1583,7 +1611,7 @@ def research_waf(client, skip_metrics=False):
             break
         acl_id = acl["Id"]
         acl_arn = acl.get("ARN", "")
-        logger.debug(f"Processing WAFv2 Web ACL: {acl_id}")
+        logger.debug("Processing WAFv2 Web ACL")
         logging_response = safe_api_call(
             "WAF",
             client.get_logging_configuration,
@@ -1637,7 +1665,7 @@ def research_kms(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         key_id = key["KeyId"]
-        logger.debug(f"Processing KMS key: {key_id}")
+        logger.debug("Processing KMS key")
         metadata_response = safe_api_call("KMS", client.describe_key, KeyId=key_id)
         metadata = metadata_response.get("KeyMetadata", {}) if isinstance(metadata_response, dict) else {}
         eligible_for_rotation = (
@@ -1697,7 +1725,7 @@ def research_elb(client, elbv2_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         lb_name = lb["LoadBalancerName"]
-        logger.debug(f"Processing Classic Load Balancer: {lb_name[:30]}...")
+        logger.debug("Processing Classic Load Balancer")
         detail = {
             "load_balancer_name": lb_name,
             "type": "classic",
@@ -1716,7 +1744,7 @@ def research_elb(client, elbv2_client, skip_metrics=False):
             break
         lb_name = lb["LoadBalancerName"]
         lb_arn = lb["LoadBalancerArn"]
-        logger.debug(f"Processing ELBv2 load balancer: {lb_name[:30]}...")
+        logger.debug("Processing ELBv2 load balancer")
         attributes_response = safe_api_call(
             "ELBv2",
             elbv2_client.describe_load_balancer_attributes,
@@ -1778,7 +1806,7 @@ def research_guardduty(client, skip_metrics=False):
     for detector in detectors:
         if shutdown_event.is_set():
             break
-        logger.debug(f"Processing GuardDuty detector: {detector}")
+        logger.debug("Processing GuardDuty detector")
         detector_response = safe_api_call("GuardDuty", client.get_detector, DetectorId=detector)
         detector_status = detector_response.get("Status", "Unknown")
         detail = {"detector_id": detector, "status": detector_status, "estimated_savings": 0, "recommendations": []}
@@ -1818,7 +1846,7 @@ def research_iam(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         policy_name = policy["PolicyName"]
-        logger.debug(f"Processing IAM policy: {policy_name[:30]}...")
+        logger.debug("Processing IAM policy")
         policy_doc = safe_api_call(
             "IAM", client.get_policy_version, PolicyArn=policy["Arn"], VersionId=policy["DefaultVersionId"]
         )
@@ -1963,7 +1991,7 @@ def research_firewall_manager(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         policy_id = policy["PolicyId"]
-        logger.debug(f"Processing Firewall Manager policy: {policy_id}")
+        logger.debug("Processing Firewall Manager policy")
         detail = {
             "policy_id": policy_id,
             "name": policy.get("PolicyName", "N/A"),
@@ -2025,7 +2053,7 @@ def research_ec2(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         instance_id = instance["InstanceId"]
-        logger.debug(f"Processing EC2 instance: {instance_id}")
+        logger.debug("Processing EC2 instance")
         state = instance.get("State", {}).get("Name", "N/A")
         cpu = (
             get_cloudwatch_metric(
@@ -2193,7 +2221,7 @@ def research_cloudtrail(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         trail_name = trail["Name"]
-        logger.debug(f"Processing CloudTrail trail: {trail_name[:30]}...")
+        logger.debug("Processing CloudTrail trail")
 
         # Fetch actual logging status via get_trail_status
         is_logging = None
@@ -2244,7 +2272,7 @@ def research_cloudwatch(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         alarm_name = alarm["AlarmName"]
-        logger.debug(f"Processing CloudWatch alarm: {alarm_name[:30]}...")
+        logger.debug("Processing CloudWatch alarm")
 
         # Use the StateValue from the alarm object directly (not a nonexistent metric)
         state_value = alarm.get("StateValue", "UNKNOWN")
@@ -2287,7 +2315,7 @@ def research_rds(client, cw_client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         instance_id = instance["DBInstanceIdentifier"]
-        logger.debug(f"Processing RDS instance: {instance_id[:30]}...")
+        logger.debug("Processing RDS instance")
         cpu = get_cloudwatch_metric(
             cw_client,
             "AWS/RDS",
@@ -2364,7 +2392,7 @@ def research_codecommit(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         repo_name = repo["repositoryName"]
-        logger.debug(f"Processing CodeCommit repository: {repo_name[:30]}...")
+        logger.debug("Processing CodeCommit repository")
         metadata_response = safe_api_call("CodeCommit", client.get_repository, repositoryName=repo_name)
         metadata = metadata_response.get("repositoryMetadata", {}) if isinstance(metadata_response, dict) else {}
         last_modified = metadata.get("lastModifiedDate")
@@ -2414,7 +2442,7 @@ def research_ecr(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         repo_name = repo["repositoryName"]
-        logger.debug(f"Processing ECR repository: {repo_name[:30]}...")
+        logger.debug("Processing ECR repository")
         lifecycle = safe_api_call(
             "ECR",
             client.get_lifecycle_policy,
@@ -2477,7 +2505,7 @@ def research_trusted_advisor(client, skip_metrics=False):
         if shutdown_event.is_set():
             break
         check_id = check["id"]
-        logger.debug(f"Processing Trusted Advisor check: {check['name'][:30]}...")
+        logger.debug("Processing Trusted Advisor check")
         result = safe_api_call("Trusted Advisor", client.describe_trusted_advisor_check_result, checkId=check_id)
         recommendations = []
         if not isinstance(result.get("result"), dict) or not result["result"].get("status"):
@@ -2632,7 +2660,7 @@ def load_local_image(local_filename=None):
         logger.warning("Report logo must be a PNG or JPEG file")
         return None
     if not image_path.is_file():
-        logger.warning(f"Report logo not found: {image_path}")
+        logger.warning("Report logo not found; verify the configured local file")
         return None
     return str(image_path)
 
@@ -3474,7 +3502,9 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False, *, paren
     kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
-    # LIST_DIRECTORY activates sharing checks; READ_ATTRIBUTES alone does not. Never share delete.
+    # LIST_DIRECTORY activates delete sharing conflicts. Write sharing is required
+    # for NTFS publication. The caller pins the immediate child of every ancestor
+    # through publication, so no guarded directory can be emptied and reparsed.
     handle = kernel.CreateFileW(
         str(path),
         0x81 | (0x60000 if sid else 0) | (0x20000 if parent_sid else 0) | (0x10000 if remove_on_exit else 0),
@@ -3569,8 +3599,20 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False, *, paren
                     raise ctypes.WinError(error)
             finally:
                 kernel.LocalFree(descriptor)
+
+        def revalidate():
+            current = (wintypes.DWORD * 2)()
+            if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(current), ctypes.sizeof(current)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not current[0] & 0x10 or current[0] & 0x400:
+                raise PermissionError("Report directory changed its reparse state")
+            expected_sid = parent_sid or sid
+            if expected_sid:
+                verify_windows_parent_security(handle, expected_sid, bool(sid) or require_user_owner)
+
+        revalidate()
         protected = True
-        yield
+        yield revalidate
     finally:
         try:
             if remove_on_exit and protected:
@@ -3631,6 +3673,36 @@ def windows_private_report_directory(parent, sid):
         kernel.LocalFree(descriptor)
 
 
+def verify_posix_report_acl(descriptor):
+    """Refuse unsupported ACL semantics and extended grants on pinned objects."""
+    # Linux local VFS POSIX ACLs are observable by descriptor. Mode bits alone
+    # cannot establish the same contract for Darwin, NFSv4, CIFS or FUSE ACLs.
+    if sys.platform != "linux":
+        raise PermissionError("Private reports require Windows NTFS or a supported local Linux filesystem")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.fstatfs.argtypes = [ctypes.c_int, ctypes.c_void_p]
+    libc.fstatfs.restype = ctypes.c_int
+    filesystem = ctypes.create_string_buffer(256)
+    if libc.fstatfs(descriptor, ctypes.byref(filesystem)) != 0:
+        raise OSError(ctypes.get_errno(), "Cannot inspect report filesystem")
+    magic = ctypes.c_long.from_buffer(filesystem).value & 0xFFFFFFFF
+    if magic not in {0xEF53, 0x58465342, 0x9123683E, 0x01021994, 0x794C7630}:
+        raise PermissionError("Private reports refuse filesystems with unverified ACL semantics")
+    attributes = ["system.posix_acl_access"]
+    if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+        attributes.append("system.posix_acl_default")
+    for name in attributes:
+        try:
+            os.getxattr(descriptor, name)
+        except OSError as error:
+            if error.errno not in {errno.ENODATA, errno.EOPNOTSUPP}:
+                raise PermissionError("Cannot establish report ACL protection") from error
+        else:
+            raise PermissionError("Report ancestry or staging has an extended ACL")
+
+
 @contextmanager
 def posix_private_report_file(parent, name):
     """Pin directory inodes; publication and cleanup never re-resolve ancestors."""
@@ -3644,6 +3716,7 @@ def posix_private_report_file(parent, name):
     try:
         for part in parent.parts[1:]:
             ancestor = os.fstat(parent_fd)
+            verify_posix_report_acl(parent_fd)
             if ancestor.st_uid not in {0, os.geteuid()} or (
                 stat.S_IMODE(ancestor.st_mode) & 0o022 and not ancestor.st_mode & stat.S_ISVTX
             ):
@@ -3656,19 +3729,25 @@ def posix_private_report_file(parent, name):
             os.close(parent_fd)
             parent_fd = child
         info = os.fstat(parent_fd)
+        verify_posix_report_acl(parent_fd)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
             raise PermissionError("Report parent must be owned by this user and not writable by others")
         os.mkdir(staging_name, 0o700, dir_fd=parent_fd)
         created = True
         staging_fd = os.open(staging_name, flags, dir_fd=parent_fd)
+        verify_posix_report_acl(staging_fd)
         fd = os.open("report", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=staging_fd)
         with os.fdopen(fd, "w+b") as stream:
             info = os.fstat(stream.fileno())
+            verify_posix_report_acl(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
                 raise PermissionError("Report temporary file is not owner-only")
             yield stream
             stream.flush()
             os.fsync(stream.fileno())
+            verify_posix_report_acl(parent_fd)
+            verify_posix_report_acl(staging_fd)
+            verify_posix_report_acl(stream.fileno())
             named = os.stat("report", dir_fd=staging_fd, follow_symlinks=False)
             if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
                 raise PermissionError("Report inode changed before publication")
@@ -3700,6 +3779,7 @@ def private_report_file(output_path):
         return
     staging = temporary = None
     with ExitStack() as locks:
+        guards = []
         if os.name == "nt":
             sid = current_windows_sid()
             for ancestor in reversed((parent, *parent.parents)):
@@ -3707,16 +3787,20 @@ def private_report_file(output_path):
                 # parent is pinned and inspected, before following any alias.
                 if not ancestor.exists():
                     ancestor.mkdir(mode=0o700)
-                locks.enter_context(
-                    windows_report_directory_lock(ancestor, parent_sid=sid, require_user_owner=ancestor == parent)
+                guards.append(
+                    locks.enter_context(
+                        windows_report_directory_lock(ancestor, parent_sid=sid, require_user_owner=ancestor == parent)
+                    )
                 )
         if os.name == "nt":
             staging = windows_private_report_directory(parent, sid)
             temporary = staging / "report"
-            locks.enter_context(windows_report_directory_lock(staging, sid, remove_on_exit=True))
+            guards.append(locks.enter_context(windows_report_directory_lock(staging, sid, remove_on_exit=True)))
             locks.callback(temporary.unlink, missing_ok=True)
         if temporary is None:
             raise OSError("Cannot establish a protected Windows report directory")
+        for guard in guards:
+            guard()
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         fd = os.open(temporary, flags, 0o600)
         with os.fdopen(fd, "w+b") as stream:
@@ -3728,6 +3812,8 @@ def private_report_file(output_path):
             yield stream
             stream.flush()
             os.fsync(stream.fileno())
+            for guard in guards:
+                guard()
             # Keep the file and directory handles open through publication.
             os.link(temporary, parent / requested.name)
 
@@ -3758,7 +3844,7 @@ def generate_pdf_report(report_data, output_pdf_path):
             )
             doc.report_banner = str(report_data.get("banner", DEFAULT_BANNER))
             doc.build(story, onFirstPage=first_page_header, onLaterPages=later_pages_header_footer)
-        logger.info(f"PDF report generated successfully: {output_path}")
+        logger.info("PDF report generated successfully")
         return str(output_path)
     except Exception as e:
         logger.error(f"Error building PDF: {sanitize_error_message(e)}")
@@ -3772,7 +3858,7 @@ def write_json_report(report_data, output_json_path):
         report_file.write(
             (json.dumps(report_data, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
         )
-    logger.info(f"JSON report generated successfully: {output_path}")
+    logger.info("JSON report generated successfully")
     return str(output_path)
 
 
@@ -3877,8 +3963,8 @@ def _main(argv=None):
         if len(args.banner) > 100:
             raise ValueError("--banner must be 100 characters or fewer")
         target_services = resolve_services(args.services)
-    except ValueError as e:
-        logger.error(str(e))
+    except ValueError:
+        logger.error("Invalid analysis configuration")
         return 2
 
     shutdown_event.clear()

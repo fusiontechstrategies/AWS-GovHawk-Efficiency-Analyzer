@@ -45,6 +45,25 @@ Protection setup failure aborts generation. Existing final entries, including
 links, are never overwritten. POSIX output parents must belong to the current
 user and must not be writable by other users.
 
+Private POSIX report creation is supported on local Linux ext2/3/4, XFS,
+Btrfs, tmpfs and overlayfs. Descriptor-based filesystem checks refuse unknown,
+network and FUSE ACL semantics; Darwin report creation is refused until its
+effective ACL semantics can be verified. Extended access or default ACLs on any
+pinned ancestor, staging directory or report file abort generation. The checks
+run before content is written and again before publication. Ordinary analysis
+does not require this filesystem contract until it creates a report.
+
+On Windows, every guarded ancestor has a retained immediate child through
+publication, and staging has the open report. Non-delete-shared handles prevent
+removal of those children. The directories therefore cannot become empty, a
+requirement for assigning a reparse point. Directory write sharing remains
+necessary for NTFS hard-link publication; owner, DACL and reparse attributes are
+revalidated before writing and publication. A preauthorized writer test uses a
+synthetic owned fixture and the actual reparse request, with an empty acceptance
+control. No host root is changed. A principal retaining historical WRITE_DAC or
+trusted administrative authority can alter permissions after the operation ends;
+continued report retention still requires an owner-controlled location.
+
 ## Collection limits and incomplete coverage
 
 Each AWS service is limited to 1,000 operation calls, 2,000 list entries,
@@ -90,3 +109,8 @@ OIDC/write job repeats exact verification, and draft uploads receive digest
 readback verification. Tagged helpers never execute in those jobs. The main-only
 release environment requires a reviewer; an authorized administrator can
 explicitly bypass that approval and remains within the trusted operator boundary.
+
+Resource progress events omit identifier values at DEBUG as well as INFO.
+Report and logo paths are not sent to logs. A logger filter and the CloudWatch
+formatter redact recognizable structured identifiers and absolute paths and
+discard traceback/stack attachments before rendering diagnostic records.

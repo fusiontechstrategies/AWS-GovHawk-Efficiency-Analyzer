@@ -97,7 +97,7 @@ class AnalyzerTests(unittest.TestCase):
         message = analyzer.sanitize_error_message(error)
         self.assertEqual(
             message,
-            "AccessDeniedException: Account [ACCOUNT_ID] denied for [ACCESS_KEY_ID]",
+            "AccessDeniedException",
         )
 
     def test_resolve_services_is_flexible_and_deduplicates(self):

@@ -75,3 +75,10 @@ including custom output paths. A crash can leave a protected staging directory
 behind. Review its ownership and contents under your retention policy before
 manual cleanup; do not add it to a commit. Git ignore rules are only an accidental
 disclosure guard, not access control.
+# Report parents, logging and immutable smoke checks
+
+On Windows, output-directory owners and DACLs are inspected by retained non-reparse handles. Existing caller directory ACLs are never rewritten. Current-user, SYSTEM, Administrators and TrustedInstaller authority forms the local operating-system trust boundary. OWNER RIGHTS is accepted only after that actual owner has been checked. Shared child-mutation, deletion, reparse and ACL/owner-control grants are refused conservatively. A canonical physical volume root is identified through its volume-GUID handle path, rather than a user-controlled pathname; its child-deletion and ACL/owner-control authority remains checked. All ordinary path components and final output parents retain mutation checks. A broadly writable temporary directory may be refused; select a private directory with trusted ancestry.
+
+Ordinary AWS errors expose only a bounded error code. Service-supplied human-readable messages, resource names, principal identities and request metadata are excluded from both local logs and optional CloudWatch Logs. Full service messages are not retained through an implicit debug mode.
+
+Release assets and their manifest are finalized and uploaded before any mutable privileged smoke-test package installation. Bubblewrap installation and candidate execution happen in a separate read-only consumer job, which cannot supply replacement artifact IDs, manifests or release bytes. Attestation and draft creation consume the producer's immutable handoff and require the consumer to pass.

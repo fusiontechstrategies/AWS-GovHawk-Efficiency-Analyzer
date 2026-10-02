@@ -100,29 +100,6 @@ jobs:
           expected="$(python -I scripts/verify_release_integrity.py assets release-assets -)"
           echo "manifest=$expected" >> "$GITHUB_OUTPUT"
 
-      - name: Install isolated runtime test sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-
-      - name: Exercise the exact standalone runtime
-        env:
-          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir smoke-assets
-          cp release-assets/*.py smoke-assets/
-          python_path="$(command -v python)"
-          candidate="$PWD/smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
-          # Read-only host mounts and isolated process/network namespaces prevent
-          # candidate execution from changing the verifier or release artifacts.
-          sandbox=(bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
-          test "$("${sandbox[@]}" "$python_path" -I "$candidate" --version)" = \
-            "GovHawk $RELEASE_VERSION"
-          "${sandbox[@]}" "$python_path" -I "$candidate" --help >/dev/null
-          "${sandbox[@]}" "$python_path" -I "$candidate" --list-services >/dev/null
-
       - name: Revalidate source and exact final bytes
         id: final
         env:
@@ -145,9 +122,59 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  smoke:
+    name: Smoke-test immutable assets on an isolated consumer
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          path: verifier
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Download immutable producer handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: release-assets
+          merge-multiple: true
+      - name: Verify producer bytes before consumer tooling
+        env:
+          EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
+        run: python -I verifier/scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
+
+      - name: Install isolated runtime test sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Exercise the exact standalone runtime
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir smoke-assets
+          cp release-assets/*.py smoke-assets/
+          python_path="$(command -v python)"
+          candidate="$PWD/smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
+          # Read-only host mounts and isolated process/network namespaces prevent
+          # candidate execution from changing the verifier or release artifacts.
+          sandbox=(bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
+          test "$("${sandbox[@]}" "$python_path" -I "$candidate" --version)" = \
+            "GovHawk $RELEASE_VERSION"
+          "${sandbox[@]}" "$python_path" -I "$candidate" --help >/dev/null
+          "${sandbox[@]}" "$python_path" -I "$candidate" --list-services >/dev/null
+
   attest:
     name: Attest release assets
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

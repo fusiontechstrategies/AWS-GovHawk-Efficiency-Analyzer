@@ -82,3 +82,11 @@ On Windows, output-directory owners and DACLs are inspected by retained non-repa
 Ordinary AWS errors expose only a bounded error code. Service-supplied human-readable messages, resource names, principal identities and request metadata are excluded from both local logs and optional CloudWatch Logs. Full service messages are not retained through an implicit debug mode.
 
 Release assets and their manifest are finalized and uploaded before any mutable privileged smoke-test package installation. Bubblewrap installation and candidate execution happen in a separate read-only consumer job, which cannot supply replacement artifact IDs, manifests or release bytes. Attestation and draft creation consume the producer's immutable handoff and require the consumer to pass.
+
+Privileged release promotion runs from protected main independently of the
+selected tag. Its trusted helper authenticates the producer's run/artifact
+identity and reconstructs all five subjects from tagged source data. Each
+OIDC/write job repeats exact verification, and draft uploads receive digest
+readback verification. Tagged helpers never execute in those jobs. The main-only
+release environment requires a reviewer; an authorized administrator can
+explicitly bypass that approval and remains within the trusted operator boundary.

@@ -2,7 +2,7 @@
 
 GovHawk releases come from a reviewed, fully tested commit on protected `main`. The runtime, changelog, release notes, dependency pins, tag, release assets, checksums, SBOM, and evidence must describe the same stable version.
 
-Creating a tag and publishing a GitHub release each require an explicit maintainer decision. The tag workflow can create only a draft. It contains no publication command for PyPI or another package registry.
+Creating a tag and publishing a GitHub release each require an explicit maintainer decision. The tag workflow builds a read-only candidate. A separate protected-main workflow can create an approved draft. Neither publishes a release or package.
 
 ## Exact asset contract
 
@@ -60,14 +60,26 @@ Pushing the tag starts `.github/workflows/release.yml`. The workflow:
 3. Refuses to continue if a release already exists for the tag.
 4. Builds the exact five assets twice and compares every byte.
 5. Exercises the exact standalone runtime.
-6. Attests every asset with GitHub provenance.
-7. Creates a non-prerelease draft from committed versioned notes.
-8. Confirms the draft contains exactly the five approved assets.
+6. Uploads an immutable candidate and requires the isolated read-only smoke consumer to pass.
+
+The successful build triggers `.github/workflows/release-promotion.yml` from
+protected `main`. It authenticates the source API run and exact artifact ID,
+pins its independently reviewed signed-main verifier, and reconstructs the
+five subjects from tagged source treated only as data. The smoke consumer
+checks digests with inline standard-library code before installing tools;
+it does not check out or execute tagged verification helpers.
+
+Both privileged promotion jobs repeat the complete reconstruction before
+attestation or draft creation. The uploaded draft is downloaded and every
+remote digest is checked against the verified manifest. Tagged verification
+code never runs in OIDC or release-write jobs.
 
 The workflow has no manual trigger and no release-publication command.
 
 The active `Immutable release tags` ruleset prevents updates and deletion of
-`v*` tags. The `release` deployment environment admits only `v*` tags. The draft
+`v*` tags. The `release` deployment environment admits only protected `main`
+and requires a maintainer reviewer. An authorized administrator can explicitly
+bypass environment approval; administrators remain trusted operators. The draft
 job verifies and peels the remote tag immediately before and after creation,
 removing a mismatched draft. Release installations use the full transitive
 `requirements-release-lock.txt` with `--require-hashes`.

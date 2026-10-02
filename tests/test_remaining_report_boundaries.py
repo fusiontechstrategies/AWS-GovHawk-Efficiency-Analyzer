@@ -77,7 +77,7 @@ class SmokeHandoffTests(unittest.TestCase):
     def test_mutable_privileged_consumer_cannot_supply_release_handoff(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
         build, rest = workflow.split("\n  smoke:\n", 1)
-        smoke, attest = rest.split("\n  attest:\n", 1)
+        smoke = rest
         self.assertNotIn("sudo ", build)
         self.assertIn("actions/upload-artifact@", build)
         self.assertIn("sudo apt-get install --yes bubblewrap", smoke)
@@ -85,8 +85,12 @@ class SmokeHandoffTests(unittest.TestCase):
         self.assertNotIn("actions/upload-artifact@", smoke)
         self.assertNotIn("GITHUB_OUTPUT", smoke)
         self.assertNotIn("outputs:", smoke)
-        self.assertIn("needs: [build, smoke]", attest)
-        self.assertNotIn("needs.smoke.outputs", attest)
+        self.assertNotIn("actions/checkout@", smoke)
+        self.assertNotIn("contents: write", workflow)
+        self.assertNotIn("id-token: write", workflow)
+        promoter = (Path(__file__).resolve().parents[1] / ".github/workflows/release-promotion.yml").read_text()
+        self.assertIn("github.event.workflow_run.conclusion == 'success'", promoter)
+        self.assertNotIn("needs.smoke.outputs", promoter)
 
 
 @unittest.skipUnless(os.name == "nt", "Actual Windows pinned-handle ACL inspection")

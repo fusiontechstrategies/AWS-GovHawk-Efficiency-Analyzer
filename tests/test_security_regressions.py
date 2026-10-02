@@ -22,6 +22,8 @@ class SecurityRegressionTests(unittest.TestCase):
         responses = [
             {"error": "synthetic AccessDenied"},
             {},
+            {"Subnets": [], "truncated": True},
+            {"Subnets": [{"SubnetId": "subnet-synthetic"}], "truncated": True},
             {"error": "partial synthetic result", "Subnets": [{"SubnetId": "subnet-synthetic"}]},
         ]
         for response in responses:
@@ -38,6 +40,19 @@ class SecurityRegressionTests(unittest.TestCase):
             self.assertFalse(result["inventory_complete"])
             self.assertEqual(result["subnet_inventory_unknown_count"], 1)
             self.assertNotIn("delete-vpc", json.dumps(detail))
+
+    def test_vpc_interruption_and_truncated_enumeration_are_incomplete(self):
+        vpcs = [{"VpcId": "vpc-one"}, {"VpcId": "vpc-two"}]
+        with (
+            patch.object(analyzer, "paginated_api_call", side_effect=[{"Vpcs": vpcs}, {"Subnets": []}]),
+            patch.object(analyzer.shutdown_event, "is_set", side_effect=[False, True]),
+        ):
+            result = analyzer.research_vpc(object())
+        self.assertFalse(result["inventory_complete"])
+        self.assertEqual(result["vpcs_analyzed"], 1)
+        with patch.object(analyzer, "paginated_api_call", side_effect=[{"Vpcs": [], "truncated": True}]):
+            result = analyzer.research_vpc(object())
+        self.assertFalse(result["inventory_complete"])
 
     def test_vpc_verified_subnets_keep_known_inventory_semantics(self):
         for subnets in ([], [{"SubnetId": "subnet-synthetic"}]):

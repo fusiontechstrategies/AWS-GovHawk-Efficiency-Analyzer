@@ -662,7 +662,10 @@ def research_vpc(client, skip_metrics=False):
             "vpc_id": vpc_id,
             "cidr_block": vpc.get("CidrBlock", "N/A"),
             "subnet_count": len(subnets["Subnets"])
-            if isinstance(subnets, dict) and "error" not in subnets and isinstance(subnets.get("Subnets"), list)
+            if isinstance(subnets, dict)
+            and "error" not in subnets
+            and not subnets.get("truncated")
+            and isinstance(subnets.get("Subnets"), list)
             else None,
             "estimated_savings": 0,
             "recommendations": [],
@@ -688,7 +691,9 @@ def research_vpc(client, skip_metrics=False):
         "vpc_count": len(vpcs),
         "vpcs_analyzed": len(vpc_details),
         "subnet_inventory_unknown_count": sum(not item["subnet_inventory_complete"] for item in vpc_details),
-        "inventory_complete": all(item["subnet_inventory_complete"] for item in vpc_details),
+        "inventory_complete": not response.get("truncated")
+        and len(vpc_details) == len(vpcs)
+        and all(item["subnet_inventory_complete"] for item in vpc_details),
         "vpc_details": vpc_details,
         "total_estimated_savings": 0,
         "general_recommendations": [

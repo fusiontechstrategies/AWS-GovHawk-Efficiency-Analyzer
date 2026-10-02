@@ -661,11 +661,18 @@ def research_vpc(client, skip_metrics=False):
         detail = {
             "vpc_id": vpc_id,
             "cidr_block": vpc.get("CidrBlock", "N/A"),
-            "subnet_count": len(subnets.get("Subnets", [])) if isinstance(subnets, dict) else 0,
+            "subnet_count": len(subnets["Subnets"])
+            if isinstance(subnets, dict) and "error" not in subnets and isinstance(subnets.get("Subnets"), list)
+            else None,
             "estimated_savings": 0,
             "recommendations": [],
         }
-        if detail["subnet_count"] == 0:
+        detail["subnet_inventory_complete"] = detail["subnet_count"] is not None
+        if detail["subnet_count"] is None:
+            detail["recommendations"].append(
+                {"description": "Subnet inventory could not be verified. Do not treat this VPC as empty or delete it."}
+            )
+        elif detail["subnet_count"] == 0:
             detail["recommendations"].append(
                 {
                     "description": "VPC has no subnets. Confirm it has no attached gateways, endpoints, peerings, or other dependencies before considering cleanup.",
@@ -680,6 +687,8 @@ def research_vpc(client, skip_metrics=False):
     return {
         "vpc_count": len(vpcs),
         "vpcs_analyzed": len(vpc_details),
+        "subnet_inventory_unknown_count": sum(not item["subnet_inventory_complete"] for item in vpc_details),
+        "inventory_complete": all(item["subnet_inventory_complete"] for item in vpc_details),
         "vpc_details": vpc_details,
         "total_estimated_savings": 0,
         "general_recommendations": [
@@ -3075,10 +3084,12 @@ def generate_service_details(story, data, styles):
 
 
 @contextmanager
-def windows_report_directory_lock(path, sid=None):
+def windows_report_directory_lock(path, sid=None, remove_on_exit=False):
     """Hold a non-reparse directory against replacement; set its DACL by handle."""
     if sys.platform != "win32":
         raise OSError("Windows report directory handles are unavailable on this platform")
+    if remove_on_exit and not sid:
+        raise ValueError("Private directory removal requires a verified owner")
     import ctypes.wintypes
 
     wintypes = ctypes.wintypes
@@ -3101,10 +3112,13 @@ def windows_report_directory_lock(path, sid=None):
     kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
-    # READ_ATTRIBUTES, optionally WRITE_DAC. Share read/write but never delete.
-    handle = kernel.CreateFileW(str(path), 0x80 | (0x60000 if sid else 0), 3, None, 3, 0x02200000, None)
+    # READ_ATTRIBUTES, optionally READ_CONTROL/WRITE_DAC/DELETE. Never share delete.
+    handle = kernel.CreateFileW(
+        str(path), 0x80 | (0x60000 if sid else 0) | (0x10000 if remove_on_exit else 0), 3, None, 3, 0x02200000, None
+    )
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
+    protected = False
     try:
         attributes = (wintypes.DWORD * 2)()
         if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
@@ -3185,9 +3199,27 @@ def windows_report_directory_lock(path, sid=None):
                     raise ctypes.WinError(error)
             finally:
                 kernel.LocalFree(descriptor)
+        protected = True
         yield
     finally:
-        kernel.CloseHandle(handle)
+        try:
+            if remove_on_exit and protected:
+                # The file cleanup runs while this handle and every ancestor are
+                # still pinned. Delete this exact empty directory by handle.
+                kernel.SetFileInformationByHandle.argtypes = [
+                    wintypes.HANDLE,
+                    ctypes.c_int,
+                    ctypes.c_void_p,
+                    wintypes.DWORD,
+                ]
+                kernel.SetFileInformationByHandle.restype = wintypes.BOOL
+                disposition = wintypes.BOOL(True)
+                if not kernel.SetFileInformationByHandle(
+                    handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)
+                ):
+                    raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            kernel.CloseHandle(handle)
 
 
 def windows_private_report_directory(parent, sid):
@@ -3281,45 +3313,40 @@ def private_report_file(output_path):
             yield stream
         return
     staging = temporary = None
-    try:
-        with ExitStack() as locks:
-            if os.name == "nt":
-                for ancestor in reversed((parent, *parent.parents)):
-                    locks.enter_context(windows_report_directory_lock(ancestor))
-            if os.name == "nt":
-                system32 = Path(os.environ["SystemRoot"]) / "System32"
-                identity = subprocess.run(  # nosec B603
-                    [str(system32 / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )  # noqa: S603
-                sid = next(csv.reader([identity.stdout.strip()]))[1]
-                if not re.fullmatch(r"S-1-[0-9-]+", sid):
-                    raise PermissionError("Cannot resolve current user SID")
-                staging = windows_private_report_directory(parent, sid)
-                temporary = staging / "report"
-                locks.enter_context(windows_report_directory_lock(staging, sid))
-            if temporary is None:
-                raise OSError("Cannot establish a protected Windows report directory")
-            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-            fd = os.open(temporary, flags, 0o600)
-            with os.fdopen(fd, "w+b") as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode):
-                    raise PermissionError("Report temporary file is not regular")
-                if sys.platform != "win32" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
-                    raise PermissionError("Report temporary file is not owner-only")
-                yield stream
-                stream.flush()
-                os.fsync(stream.fileno())
-                # Keep the file and directory handles open through publication.
-                os.link(temporary, parent / requested.name)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        if staging is not None:
-            staging.rmdir()
+    with ExitStack() as locks:
+        if os.name == "nt":
+            for ancestor in reversed((parent, *parent.parents)):
+                locks.enter_context(windows_report_directory_lock(ancestor))
+        if os.name == "nt":
+            system32 = Path(os.environ["SystemRoot"]) / "System32"
+            identity = subprocess.run(  # nosec B603
+                [str(system32 / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )  # noqa: S603
+            sid = next(csv.reader([identity.stdout.strip()]))[1]
+            if not re.fullmatch(r"S-1-[0-9-]+", sid):
+                raise PermissionError("Cannot resolve current user SID")
+            staging = windows_private_report_directory(parent, sid)
+            temporary = staging / "report"
+            locks.enter_context(windows_report_directory_lock(staging, sid, remove_on_exit=True))
+            locks.callback(temporary.unlink, missing_ok=True)
+        if temporary is None:
+            raise OSError("Cannot establish a protected Windows report directory")
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(temporary, flags, 0o600)
+        with os.fdopen(fd, "w+b") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise PermissionError("Report temporary file is not regular")
+            if sys.platform != "win32" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                raise PermissionError("Report temporary file is not owner-only")
+            yield stream
+            stream.flush()
+            os.fsync(stream.fileno())
+            # Keep the file and directory handles open through publication.
+            os.link(temporary, parent / requested.name)
 
 
 def generate_pdf_report(report_data, output_pdf_path):
@@ -3330,7 +3357,7 @@ def generate_pdf_report(report_data, output_pdf_path):
     if report_data.get("inventory_collection", {}).get("complete") is False:
         story.append(
             Paragraph(
-                "INCOMPLETE INVENTORY: collection limits were reached. Missing resources must not be treated as safe.",
+                "INCOMPLETE INVENTORY: queries failed or collection limits were reached. Missing resources must not be treated as safe.",
                 styles["BodyText"],
             )
         )
@@ -3539,9 +3566,19 @@ def _main(argv=None):
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else Path(__file__).resolve().parent / "output"
     base_name = f"govhawk_report_{timestamp}"
     report_data = dict(research)
-    incomplete = run_inventory_budget.exhausted or any(budget.exhausted for budget in inventory_budgets.values())
+    incomplete_services = [
+        name
+        for name, result in research["services"].items()
+        if isinstance(result, dict) and ("error" in result or result.get("inventory_complete") is False)
+    ]
+    incomplete = (
+        bool(incomplete_services)
+        or run_inventory_budget.exhausted
+        or any(budget.exhausted for budget in inventory_budgets.values())
+    )
     report_data["inventory_collection"] = {
         "complete": not incomplete,
+        "incomplete_services": incomplete_services,
         "budget_exhausted_services": [name for name, budget in inventory_budgets.items() if budget.exhausted],
         "run_budget_exhausted": run_inventory_budget.exhausted,
         "limits_per_service": {
@@ -3558,7 +3595,9 @@ def _main(argv=None):
         },
     }
     if incomplete:
-        logger.warning("Inventory collection budget exhausted. Report is incomplete; missing resources are not safe.")
+        logger.warning(
+            "Inventory queries failed or limits were reached. Report is incomplete; missing resources are not safe."
+        )
     report_data["logo_path"] = args.logo
     output_paths = []
 

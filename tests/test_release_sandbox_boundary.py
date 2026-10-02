@@ -54,6 +54,7 @@ class ReleaseSandboxBoundary(unittest.TestCase):
                     f"        client.connect({str(socket_path)!r})\n"
                     "    except (FileNotFoundError, PermissionError):\n        pass\n"
                     "    else:\n        raise AssertionError('host socket exposed to pth')\n"
+                    "    os.environ['SANDBOX_PTH_CHECKED'] = '1'\n"
                 ).encode(),
                 "boundary_fixture.pth": (
                     b"import sys, boundary_fixture; boundary_fixture.verify_boundary() "
@@ -177,6 +178,7 @@ class ReleaseSandboxBoundary(unittest.TestCase):
             (assets / "AWS-GovHawk-Efficiency-Analyzer-v0.py").write_text(
                 "import os, socket, sys\n"
                 "assert 'SANDBOX_HOST_SECRET' not in os.environ\n"
+                "assert os.environ.get('SANDBOX_PTH_CHECKED') == '1'\n"
                 "assert not os.path.exists('/run/docker.sock')\n"
                 "assert not os.path.exists('/var/run/docker.sock')\n"
                 "client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"

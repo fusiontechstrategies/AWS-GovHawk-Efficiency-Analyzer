@@ -100,29 +100,6 @@ jobs:
           expected="$(python -I scripts/verify_release_integrity.py assets release-assets -)"
           echo "manifest=$expected" >> "$GITHUB_OUTPUT"
 
-      - name: Install isolated runtime test sandbox
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-
-      - name: Exercise the exact standalone runtime
-        env:
-          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir smoke-assets
-          cp release-assets/*.py smoke-assets/
-          python_path="$(command -v python)"
-          candidate="$PWD/smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
-          # Read-only host mounts and isolated process/network namespaces prevent
-          # candidate execution from changing the verifier or release artifacts.
-          sandbox=(bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
-          test "$("${sandbox[@]}" "$python_path" -I "$candidate" --version)" = \
-            "GovHawk $RELEASE_VERSION"
-          "${sandbox[@]}" "$python_path" -I "$candidate" --help >/dev/null
-          "${sandbox[@]}" "$python_path" -I "$candidate" --list-services >/dev/null
-
       - name: Revalidate source and exact final bytes
         id: final
         env:
@@ -145,121 +122,88 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  attest:
-    name: Attest release assets
+  smoke:
+    name: Smoke-test immutable assets on an isolated consumer
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-      id-token: write
-      attestations: write
     steps:
-      - name: Download the exact release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Download immutable producer handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: release-assets
           merge-multiple: true
-
-      - name: Check out integrity verifier
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          path: verifier
-
-      - name: Verify bytes before attestation
+      - name: Verify producer bytes before consumer tooling
         env:
           EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
-        run: python -I verifier/scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
-
-      - name: Attest every release asset
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: release-assets/*
-
-  draft:
-    name: Create and verify draft release
-    needs: [build, attest]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: release
-    permissions:
-      contents: write
-    steps:
-      - name: Check out tagged release notes
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Download the exact release assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          artifact-ids: ${{ needs.build.outputs.artifact-id }}
-          path: release-assets
-          merge-multiple: true
-
-      - name: Create draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
-        shell: bash
         run: |
-          set -euo pipefail
-          python -I scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
-          python -I scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft \
-            --verify-tag \
-            --target "$RELEASE_COMMIT" \
-            --title "GovHawk $RELEASE_VERSION" \
-            --notes-file ".github/release-notes/$GITHUB_REF_NAME.md" \
-            "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" \
-            "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.zip" \
-            "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.spdx.json" \
-            "release-assets/SHA256SUMS.txt" \
-            "release-assets/release-evidence.json"
-          if ! python -I scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"; then
-            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
-            exit 1
-          fi
-
-      - name: Verify exact draft state
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
-          EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -I scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir readback-assets
-          python -I scripts/verify_release_integrity.py assets readback-assets "$EXPECTED_MANIFEST"
-          gh release view "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json isDraft,isPrerelease,assets > release-state.json
-          python -I - "$RELEASE_VERSION" <<'PY'
-          import json
-          import sys
-
-          version = sys.argv[1]
-          state = json.load(open("release-state.json", encoding="utf-8"))
-          expected = {
-              f"AWS-GovHawk-Efficiency-Analyzer-v{version}.py",
-              f"AWS-GovHawk-Efficiency-Analyzer-v{version}.zip",
-              f"AWS-GovHawk-Efficiency-Analyzer-v{version}.spdx.json",
-              "SHA256SUMS.txt",
-              "release-evidence.json",
-          }
-          actual = {asset["name"] for asset in state["assets"]}
-          if state["isDraft"] is not True or state["isPrerelease"] is not False:
-              raise SystemExit("Release must remain a non-prerelease draft")
-          if actual != expected:
-              raise SystemExit(f"Unexpected release asset set: {sorted(actual)}")
+          python -I - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('release-assets')
+          expected = json.loads(os.environ['EXPECTED_MANIFEST'])
+          assert {p.name for p in root.iterdir()} == set(expected)
+          for name, digest in expected.items():
+              path = root / name
+              assert path.is_file() and not path.is_symlink()
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
           PY
+
+      - name: Install isolated runtime test sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+
+      - name: Obtain the exact signed source dependency lock as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GH_REPO/contents/requirements-release-lock.txt?ref=$SOURCE_COMMIT" > source-lock.json
+          python -I - <<'PY'
+          import base64, hashlib, json
+          from pathlib import Path
+          record = json.loads(Path('source-lock.json').read_text())
+          assert record['encoding'] == 'base64' and 0 < record['size'] <= 256 * 1024
+          encoded = ''.join(record['content'].split())
+          assert len(encoded) <= 350 * 1024
+          value = base64.b64decode(encoded, validate=True)
+          assert len(value) == record['size']
+          # Git's blob object name binds the returned bytes, not a credential hash.
+          blob = b'blob ' + str(len(value)).encode() + b'\0' + value
+          assert hashlib.sha1(blob, usedforsecurity=False).hexdigest() == record['sha']
+          Path('runtime-lock.txt').write_bytes(value)
+          PY
+
+      - name: Install exact hash-locked smoke runtime dependencies
+        run: |
+          python -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r runtime-lock.txt
+
+      - name: Exercise the exact standalone runtime
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir smoke-assets
+          cp release-assets/*.py smoke-assets/
+          python_path="$(command -v python)"
+          candidate="$PWD/smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
+          # Read-only host mounts and isolated process/network namespaces prevent
+          # candidate execution from changing the verifier or release artifacts.
+          sandbox=(bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
+          test "$("${sandbox[@]}" "$python_path" -I "$candidate" --version)" = \
+            "GovHawk $RELEASE_VERSION"
+          "${sandbox[@]}" "$python_path" -I "$candidate" --help >/dev/null
+          "${sandbox[@]}" "$python_path" -I "$candidate" --list-services >/dev/null
+

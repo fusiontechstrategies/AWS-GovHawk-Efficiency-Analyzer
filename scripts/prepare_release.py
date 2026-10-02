@@ -33,6 +33,7 @@ WINDOWS_RESERVED_NAMES = {
 PACKAGE_FILES = (
     ".github/release-notes/v2.0.0.md",
     ".github/workflows/release.yml",
+    ".github/workflows/release-promotion.yml",
     "AWS_GovCloud_Analyzer.py",
     "CHANGELOG.md",
     "CODE_OF_CONDUCT.md",
@@ -50,6 +51,7 @@ PACKAGE_FILES = (
     "requirements.txt",
     "requirements-release-lock.txt",
     "scripts/prepare_release.py",
+    "scripts/verify_release_handoff.py",
     "scripts/verify_release_integrity.py",
     "tests/test_analyzer.py",
     "tests/test_release_assets.py",

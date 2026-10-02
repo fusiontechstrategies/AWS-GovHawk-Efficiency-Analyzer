@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import stat
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 
-from scripts import prepare_release
+from scripts import prepare_release, verify_release_handoff
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERSION = "2.0.0"
@@ -18,6 +19,43 @@ SOURCE_DATE_EPOCH = 315532800
 
 
 class ReleaseAssetTests(unittest.TestCase):
+    def test_trusted_promotion_binds_identity_and_every_subject(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.prepare(root, "assets")
+            assets = root / "assets"
+            result = verify_release_handoff.verify_handoff(assets, PROJECT_ROOT, SOURCE_COMMIT, SOURCE_DATE_EPOCH)
+            self.assertEqual(result["tag"], TAG)
+            self.assertEqual(len(result["manifest"]), 5)
+            for commit, epoch in (("b" * 40, SOURCE_DATE_EPOCH), (SOURCE_COMMIT, SOURCE_DATE_EPOCH + 1)):
+                with self.assertRaisesRegex(ValueError, "authenticated source identity"):
+                    verify_release_handoff.verify_handoff(assets, PROJECT_ROOT, commit, epoch)
+            subject = assets / f"AWS-GovHawk-Efficiency-Analyzer-{TAG}.py"
+            subject.write_bytes(subject.read_bytes() + b"\n# replaced subject\n")
+            with self.assertRaises(ValueError):
+                verify_release_handoff.verify_handoff(assets, PROJECT_ROOT, SOURCE_COMMIT, SOURCE_DATE_EPOCH)
+
+    def test_tagged_helper_is_data_during_privileged_promotion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            for name in prepare_release.PACKAGE_FILES:
+                destination = source / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(PROJECT_ROOT / name, destination)
+            (source / "scripts/prepare_release.py").write_text("raise RuntimeError('tagged code executed')\n")
+            prepare_release.prepare_release(source, root / "assets", VERSION, TAG, SOURCE_COMMIT, SOURCE_DATE_EPOCH)
+            result = verify_release_handoff.verify_handoff(root / "assets", source, SOURCE_COMMIT, SOURCE_DATE_EPOCH)
+            self.assertEqual(result["version"], VERSION)
+
+    def test_privileged_promoter_authenticates_artifact_and_independent_verifier(self):
+        workflow = (PROJECT_ROOT / ".github/workflows/release-promotion.yml").read_text()
+        self.assertIn("run['path'] == '.github/workflows/release.yml'", workflow)
+        self.assertIn("ref: ${{ needs.verify.outputs.verifier-commit }}", workflow)
+        self.assertIn("artifact-ids: ${{ needs.verify.outputs.artifact-id }}", workflow)
+        self.assertNotIn("python -I source-data/", workflow)
+        self.assertIn('assets readback "$EXPECTED_MANIFEST"', workflow)
+
     @staticmethod
     def prepare(parent: Path, name: str) -> tuple[Path, ...]:
         return prepare_release.prepare_release(

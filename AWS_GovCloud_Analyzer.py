@@ -299,10 +299,11 @@ def sanitize_error_message(error):
     """Return a useful error summary without tracebacks or request metadata."""
     if isinstance(error, ClientError):
         code = error.response.get("Error", {}).get("Code", "Unknown")
-        msg = error.response.get("Error", {}).get("Message", "Unknown error")
-        safe_message = re.sub(r"(?<!\d)\d{12}(?!\d)", "[ACCOUNT_ID]", str(msg))
-        safe_message = re.sub(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", "[ACCESS_KEY_ID]", safe_message)
-        return f"{code}: {safe_message}"
+        if not isinstance(code, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", code):
+            code = "Unknown"
+        # AWS human-readable messages can carry resource/principal identifiers.
+        # Ordinary logs and report errors retain only the bounded error category.
+        return code
     if isinstance(error, NoCredentialsError):
         return "Credentials not found"
     return type(error).__name__
@@ -3316,8 +3317,136 @@ def generate_service_details(story, data, styles):
         story.append(Spacer(1, 0.1 * inch))
 
 
+def current_windows_sid():
+    identity = subprocess.run(  # noqa: S603 # nosec B603
+        [
+            str(Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe"),
+            "/user",
+            "/fo",
+            "csv",
+            "/nh",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sid = next(csv.reader([identity.stdout.strip()]))[1]
+    if not re.fullmatch(r"S-1-[0-9-]+", sid):
+        raise PermissionError("Cannot resolve current user SID")
+    return sid
+
+
+def verify_windows_parent_security(handle, sid, require_user_owner=False):
+    """Read existing security by pinned handle. Never rewrite caller directories."""
+    if sys.platform != "win32":
+        raise OSError("Windows security APIs require Windows")
+    import ctypes.wintypes
+
+    wintypes = ctypes.wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    security.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    security.GetSecurityInfo.restype = wintypes.DWORD
+    security.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    security.ConvertSidToStringSidW.restype = wintypes.BOOL
+    security.GetAclInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    security.GetAclInformation.restype = wintypes.BOOL
+    security.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    security.GetAce.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    kernel.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    kernel.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    canonical = ctypes.create_unicode_buffer(512)
+    length = kernel.GetFinalPathNameByHandleW(handle, canonical, len(canonical), 1)
+    volume_root = bool(
+        0 < length < len(canonical) and re.fullmatch(r"\\\\\?\\Volume\{[0-9A-Fa-f-]{36}\}\\", canonical.value)
+    )
+
+    def sid_text(value):
+        text = wintypes.LPWSTR()
+        if not value or not security.ConvertSidToStringSidW(value, ctypes.byref(text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return text.value
+        finally:
+            kernel.LocalFree(text)
+
+    trusted = {
+        sid,
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    }
+    owner, dacl, descriptor = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    error = security.GetSecurityInfo(
+        handle, 1, 5, ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor)
+    )
+    if error:
+        raise ctypes.WinError(error)
+    try:
+        actual_owner = sid_text(owner)
+        if actual_owner not in trusted:
+            raise PermissionError("Output directory has an untrusted owner")
+        # OWNER RIGHTS denotes the owner whose SID was just validated, rather
+        # than an independent principal. Python's private temp directories use it.
+        trusted.add("S-1-3-4")
+        if not dacl.value:
+            raise PermissionError("Output directory has a NULL DACL")
+        info = (wintypes.DWORD * 3)()
+        if not security.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info[0] > 4096:
+            raise PermissionError("Output directory ACL exceeds its inspection budget")
+        # ADD_FILE or WRITE_ATTRIBUTES can authorize reparse-point retargeting
+        # after our handles close, including on an intermediate directory.
+        dangerous = 0x40 | 0x40000 | 0x80000
+        if not volume_root:
+            dangerous |= 0x2 | 0x100 | 0x10000
+        if require_user_owner:
+            dangerous |= 0x2 | 0x4 | 0x10 | 0x100
+        for index in range(info[0]):
+            ace = ctypes.c_void_p()
+            if not security.GetAce(dacl, index, ctypes.byref(ace)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            address = ace.value
+            if address is None:
+                raise PermissionError("Missing output directory permission ACE")
+            header = (ctypes.c_ubyte * 4).from_address(address)
+            if header[1] & 0x08:  # INHERIT_ONLY cannot authorize mutation of this directory.
+                continue
+            if header[0] == 1:  # Ignoring denies conservatively refuses ambiguous grants.
+                continue
+            if header[0] != 0 or int.from_bytes(bytes(header[2:4]), "little") < 12:
+                raise PermissionError("Unsupported output directory permission ACE")
+            mask = ctypes.c_uint32.from_address(address + 4).value
+            # Expand generic file rights before examining the specific mask.
+            if mask & 0x10000000:
+                mask |= 0x1F01FF
+            if mask & 0x40000000:
+                mask |= 0x120116
+            if mask & dangerous and sid_text(address + 8) not in trusted:
+                raise PermissionError("Output directory can be modified by another user")
+    finally:
+        kernel.LocalFree(descriptor)
+
+
 @contextmanager
-def windows_report_directory_lock(path, sid=None, remove_on_exit=False):
+def windows_report_directory_lock(path, sid=None, remove_on_exit=False, *, parent_sid=None, require_user_owner=False):
     """Hold a non-reparse directory against replacement; set its DACL by handle."""
     if sys.platform != "win32":
         raise OSError("Windows report directory handles are unavailable on this platform")
@@ -3347,7 +3476,13 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False):
     kernel.LocalFree.restype = ctypes.c_void_p
     # LIST_DIRECTORY activates sharing checks; READ_ATTRIBUTES alone does not. Never share delete.
     handle = kernel.CreateFileW(
-        str(path), 0x81 | (0x60000 if sid else 0) | (0x10000 if remove_on_exit else 0), 3, None, 3, 0x02200000, None
+        str(path),
+        0x81 | (0x60000 if sid else 0) | (0x20000 if parent_sid else 0) | (0x10000 if remove_on_exit else 0),
+        3,
+        None,
+        3,
+        0x02200000,
+        None,
     )
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -3358,6 +3493,8 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False):
             raise ctypes.WinError(ctypes.get_last_error())
         if not attributes[0] & 0x10 or attributes[0] & 0x400:
             raise PermissionError("Report directory must be a regular non-reparse directory")
+        if parent_sid:
+            verify_windows_parent_security(handle, parent_sid, require_user_owner)
         if sid:
             # A replaced staging pathname must not be adopted merely because
             # its DACL can be rewritten. Bind its owner before writing bytes.
@@ -3500,11 +3637,24 @@ def posix_private_report_file(parent, name):
     if sys.platform == "win32":
         raise OSError("POSIX directory descriptors are unavailable on Windows")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    parent_fd = os.open(parent, flags)
+    parent_fd = os.open(parent.anchor, flags)
     staging_fd = None
     staging_name = ".govhawk-private-" + os.urandom(16).hex()
     created = False
     try:
+        for part in parent.parts[1:]:
+            ancestor = os.fstat(parent_fd)
+            if ancestor.st_uid not in {0, os.geteuid()} or (
+                stat.S_IMODE(ancestor.st_mode) & 0o022 and not ancestor.st_mode & stat.S_ISVTX
+            ):
+                raise PermissionError("Report ancestry can be replaced by another user")
+            try:
+                child = os.open(part, flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o700, dir_fd=parent_fd)
+                child = os.open(part, flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = child
         info = os.fstat(parent_fd)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
             raise PermissionError("Report parent must be owned by this user and not writable by others")
@@ -3539,8 +3689,11 @@ def posix_private_report_file(parent, name):
 def private_report_file(output_path):
     """Create an owner-only regular file before writing and publish without overwrite."""
     requested = Path(output_path).expanduser().absolute()
-    parent = requested.parent.resolve()
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if ".." in requested.parts:
+        raise PermissionError("Report path cannot contain parent traversal")
+    # Keep the returned lexical path in the guarded chain. Resolving first would
+    # erase a mutable junction/symlink alias that could be retargeted afterward.
+    parent = requested.parent
     if sys.platform != "win32":
         with posix_private_report_file(parent, requested.name) as stream:
             yield stream
@@ -3548,19 +3701,16 @@ def private_report_file(output_path):
     staging = temporary = None
     with ExitStack() as locks:
         if os.name == "nt":
+            sid = current_windows_sid()
             for ancestor in reversed((parent, *parent.parents)):
-                locks.enter_context(windows_report_directory_lock(ancestor))
+                # New components are created only while the existing lexical
+                # parent is pinned and inspected, before following any alias.
+                if not ancestor.exists():
+                    ancestor.mkdir(mode=0o700)
+                locks.enter_context(
+                    windows_report_directory_lock(ancestor, parent_sid=sid, require_user_owner=ancestor == parent)
+                )
         if os.name == "nt":
-            system32 = Path(os.environ["SystemRoot"]) / "System32"
-            identity = subprocess.run(  # nosec B603
-                [str(system32 / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )  # noqa: S603
-            sid = next(csv.reader([identity.stdout.strip()]))[1]
-            if not re.fullmatch(r"S-1-[0-9-]+", sid):
-                raise PermissionError("Cannot resolve current user SID")
             staging = windows_private_report_directory(parent, sid)
             temporary = staging / "report"
             locks.enter_context(windows_report_directory_lock(staging, sid, remove_on_exit=True))

@@ -32,7 +32,9 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import timezone
+from functools import wraps
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
@@ -40,6 +42,8 @@ from typing import Any
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+from botocore.model import ServiceModel
+from botocore.validate import validate_parameters
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
@@ -158,10 +162,17 @@ class BudgetedClient:
         if name not in self.client.meta.method_to_api_mapping:
             return attribute
 
+        @wraps(attribute)
         def bounded(**kwargs):
             run_inventory_budget.consume()
             self.budget.consume()
             response = attribute(**kwargs)
+            model = getattr(self.client.meta, "service_model", None)
+            if isinstance(model, ServiceModel):
+                operation = model.operation_model(self.client.meta.method_to_api_mapping[name])
+                validate_parameters(
+                    {key: value for key, value in response.items() if key != "ResponseMetadata"}, operation.output_shape
+                )
             self.budget.consume(response)
             run_inventory_budget.consume(response)
             return response
@@ -174,6 +185,88 @@ class BudgetedClient:
         # binding so follow-up pages cannot bypass request or response budgets.
         paginator._method = getattr(self, name)
         return paginator
+
+
+class CollectionStatus:
+    """Keep failures even when a collector retains only successful resources."""
+
+    def __init__(self):
+        self.reasons: list[str] = []
+
+    def note(self, reason):
+        # Bounded, de-duplicated service/operation labels, never raw AWS responses.
+        if reason not in self.reasons and len(self.reasons) < 32:
+            self.reasons.append(reason)
+
+
+collection_status: ContextVar[CollectionStatus | None] = ContextVar("collection_status", default=None)
+
+
+def note_collection_failure(reason):
+    status = collection_status.get()
+    if status is not None:
+        status.note(reason)
+
+
+def tracked_collection_call(func):
+    """Record helper failures before callers can discard their response."""
+
+    @wraps(func)
+    def tracked(*args, **kwargs):
+        result = func(*args, **kwargs)
+        if isinstance(result, dict) and ("error" in result or result.get("truncated")):
+            label = str(args[0]) if args else func.__name__
+            operation = args[2] if func.__name__ == "paginated_api_call" else func.__name__
+            note_collection_failure(f"{label}: {operation} failed or was truncated")
+        return result
+
+    return tracked
+
+
+def inventory_collection(func):
+    """Every service returns an explicit coverage contract, including interruption."""
+
+    @wraps(func)
+    def collected(*args, **kwargs):
+        status = CollectionStatus()
+        token = collection_status.set(status)
+        try:
+            result = func(*args, **kwargs)
+            if not isinstance(result, dict):
+                result = {"error": "Collector returned a malformed result"}
+            if "error" in result or result.get("inventory_complete") is False:
+                status.note("Collector reported incomplete inventory")
+            if shutdown_event.is_set():
+                status.note("Collection interrupted")
+            result["inventory_complete"] = not status.reasons
+            result["incomplete_reasons"] = status.reasons
+            return result
+        finally:
+            collection_status.reset(token)
+
+    return collected
+
+
+def inventory_collection_summary(target_services, services):
+    """Reconcile planned work with recorded service coverage and interruption."""
+    missing = sorted(set(target_services) - set(services))
+    incomplete_services = sorted(
+        name
+        for name, result in services.items()
+        if not isinstance(result, dict) or "error" in result or result.get("inventory_complete") is not True
+    )
+    return {
+        "complete": not (
+            missing
+            or incomplete_services
+            or shutdown_event.is_set()
+            or run_inventory_budget.exhausted
+            or any(b.exhausted for b in inventory_budgets.values())
+        ),
+        "incomplete_services": sorted(set(incomplete_services) | set(missing)),
+        "missing_services": missing,
+        "interrupted": shutdown_event.is_set(),
+    }
 
 
 # ============================================================================
@@ -224,11 +317,49 @@ def validate_region(region):
 # ============================================================================
 # Helper Functions
 # ============================================================================
+@tracked_collection_call
 def safe_api_call(service, func, suppress_errors=None, **kwargs):
     if shutdown_event.is_set():
         return {"error": "Shutdown initiated"}
     try:
-        return func(**kwargs)
+        response = func(**kwargs)
+        if not isinstance(response, dict) or not any(key != "ResponseMetadata" for key in response):
+            return {"error": "AWS response missing or malformed"}
+        payload_fields: dict[str, tuple[str, Any]] = {
+            "list_buckets": ("Buckets", list),
+            "get_bucket_location": ("LocationConstraint", (str, type(None))),
+            "get_bucket_lifecycle_configuration": ("Rules", list),
+            "get_bucket_policy_status": ("PolicyStatus", dict),
+            "get_bucket_acl": ("Grants", list),
+            "get_public_access_block": ("PublicAccessBlockConfiguration", dict),
+            "get_bucket_encryption": ("ServerSideEncryptionConfiguration", dict),
+            "get_backup_plan": ("BackupPlan", dict),
+            "describe_clusters": ("clusters", list),
+            "describe_lifecycle_configuration": ("LifecyclePolicies", list),
+            "describe_stream_summary": ("StreamDescriptionSummary", dict),
+            "get_identity_verification_attributes": ("VerificationAttributes", dict),
+            "get_logging_configuration": ("LoggingConfiguration", dict),
+            "describe_key": ("KeyMetadata", dict),
+            "get_key_rotation_status": ("KeyRotationEnabled", bool),
+            "describe_load_balancer_attributes": ("Attributes", list),
+            "get_detector": ("Status", str),
+            "get_policy_version": ("PolicyVersion", dict),
+            "describe_volumes": ("Volumes", list),
+            "batch_get_account_status": ("accounts", list),
+            "describe_hub": ("HubArn", str),
+            "describe_trails": ("trailList", list),
+            "get_trail_status": ("IsLogging", bool),
+            "get_repository": ("repositoryMetadata", dict),
+            "get_lifecycle_policy": ("lifecyclePolicyText", str),
+            "describe_trusted_advisor_checks": ("checks", list),
+            "describe_trusted_advisor_check_result": ("result", dict),
+        }
+        required = payload_fields.get(getattr(func, "__name__", ""))
+        if required and (required[0] not in response or not isinstance(response[required[0]], required[1])):
+            return {"error": "AWS response required payload missing or malformed"}
+        if response.get("failures") or response.get("failedAccounts"):
+            note_collection_failure(f"{service}: AWS reported failed resources")
+        return response
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         if suppress_errors and error_code in suppress_errors:
@@ -249,6 +380,7 @@ def safe_api_call(service, func, suppress_errors=None, **kwargs):
         return {"error": safe_msg}
 
 
+@tracked_collection_call
 def paginated_api_call(service, client, operation_name, result_keys, **kwargs):
     """Combine bounded pages; report truncation rather than silently omit inventory."""
     keys = [result_keys] if isinstance(result_keys, str) else list(result_keys)
@@ -303,6 +435,7 @@ def create_aws_client(service_name, region=None):
     return BudgetedClient(client, budget)
 
 
+@tracked_collection_call
 def get_cloudwatch_metric(
     client, namespace, metric_name, dimensions, start_time, end_time, period=86400, stat="Average", skip_metrics=False
 ):
@@ -325,7 +458,15 @@ def get_cloudwatch_metric(
             StartTime=start_time,
             EndTime=end_time,
         )
-        results = response.get("MetricDataResults", [])
+        results = response.get("MetricDataResults")
+        if not isinstance(results, list) or any(not isinstance(item, dict) for item in results):
+            return {"error": "CloudWatch metric response missing or malformed"}
+        if (
+            response.get("NextToken")
+            or response.get("Messages")
+            or any(item.get("StatusCode") not in {None, "Complete"} or item.get("Messages") for item in results)
+        ):
+            return {"error": "CloudWatch metric response incomplete"}
         values = results[0].get("Values", []) if results else []
         if not values:
             return {"average": None, "values": [], "status": "no_data"}
@@ -422,6 +563,7 @@ def setup_cloudwatch_logging(log_group, log_stream, region):
 # ============================================================================
 
 
+@inventory_collection
 def research_s3(client, cw_client, skip_metrics=False):
     logger.info("=== Starting S3 Research ===")
     response = safe_api_call("S3", client.list_buckets)
@@ -490,7 +632,12 @@ def research_s3(client, cw_client, skip_metrics=False):
         else:
             lifecycle_enabled = any(rule.get("Status") == "Enabled" for rule in lifecycle.get("Rules", []))
 
-        policy_verified = "error" not in policy_status
+        policy_verified = "error" not in policy_status and (
+            policy_status.get("suppressed_error") == "NoSuchBucketPolicy"
+            or isinstance(policy_status.get("PolicyStatus", {}).get("IsPublic"), bool)
+        )
+        if not policy_verified:
+            note_collection_failure("S3: bucket public-policy status could not be verified")
         policy_public = bool(policy_status.get("PolicyStatus", {}).get("IsPublic")) if policy_verified else False
         public_group_uris = {
             "http://acs.amazonaws.com/groups/global/AllUsers",
@@ -640,6 +787,7 @@ def research_s3(client, cw_client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_vpc(client, skip_metrics=False):
     logger.info("=== Starting VPC Research ===")
     response = paginated_api_call("VPC", client, "describe_vpcs", "Vpcs")
@@ -724,6 +872,7 @@ def research_vpc(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_direct_connect(client, skip_metrics=False):
     logger.info("=== Starting Direct Connect Research ===")
     response = paginated_api_call("Direct Connect", client, "describe_connections", "connections")
@@ -766,6 +915,7 @@ def research_direct_connect(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_backup(client, skip_metrics=False):
     logger.info("=== Starting Backup Research ===")
     response = paginated_api_call("Backup", client, "list_backup_plans", "BackupPlansList")
@@ -828,6 +978,7 @@ def research_backup(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_lambda(client, cw_client, skip_metrics=False):
     logger.info("=== Starting Lambda Research ===")
     response = paginated_api_call("Lambda", client, "list_functions", "Functions")
@@ -889,6 +1040,7 @@ def research_lambda(client, cw_client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_opensearch(client, skip_metrics=False):
     logger.info("=== Starting OpenSearch Research ===")
     response = paginated_api_call("OpenSearch", client, "list_domain_names", "DomainNames")
@@ -927,6 +1079,7 @@ def research_opensearch(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_cloudformation(client, skip_metrics=False):
     logger.info("=== Starting CloudFormation Research ===")
     response = paginated_api_call("CloudFormation", client, "list_stacks", "StackSummaries")
@@ -984,6 +1137,7 @@ def research_cloudformation(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_ecs(client, skip_metrics=False):
     logger.info("=== Starting ECS Research ===")
     response = paginated_api_call("ECS", client, "list_clusters", "clusterArns")
@@ -1005,7 +1159,21 @@ def research_ecs(client, skip_metrics=False):
         if "error" in services:
             continue
 
-        cluster_info = cluster.get("clusters", [{}])[0] if cluster.get("clusters") else {}
+        described = cluster.get("clusters")
+        if (
+            not isinstance(described, list)
+            or len(described) != 1
+            or not isinstance(described[0], dict)
+            or not all(
+                isinstance(described[0].get(key), int)
+                and not isinstance(described[0][key], bool)
+                and described[0][key] >= 0
+                for key in ("registeredContainerInstancesCount", "runningTasksCount")
+            )
+        ):
+            note_collection_failure("ECS: describe_clusters did not return the requested cluster")
+            continue
+        cluster_info = described[0]
 
         detail = {
             "cluster_name": cluster_name,
@@ -1042,6 +1210,7 @@ def research_ecs(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_appstream(client, skip_metrics=False):
     logger.info("=== Starting AppStream Research ===")
     response = paginated_api_call("AppStream", client, "describe_fleets", "Fleets")
@@ -1084,6 +1253,7 @@ def research_appstream(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_directory_service(client, skip_metrics=False):
     logger.info("=== Starting Directory Service Research ===")
     response = paginated_api_call("Directory Service", client, "describe_directories", "DirectoryDescriptions")
@@ -1122,6 +1292,7 @@ def research_directory_service(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_ebs(client, cw_client, skip_metrics=False):
     logger.info("=== Starting EBS Research ===")
     response = paginated_api_call("EBS", client, "describe_volumes", "Volumes")
@@ -1235,6 +1406,7 @@ def research_ebs(client, cw_client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_efs(client, skip_metrics=False):
     logger.info("=== Starting EFS Research ===")
     response = paginated_api_call("EFS", client, "describe_file_systems", "FileSystems")
@@ -1290,6 +1462,7 @@ def research_efs(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_kinesis(client, skip_metrics=False):
     logger.info("=== Starting Kinesis Research ===")
     response = paginated_api_call("Kinesis", client, "list_streams", "StreamNames")
@@ -1332,6 +1505,7 @@ def research_kinesis(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_ses(client, skip_metrics=False):
     logger.info("=== Starting SES Research ===")
     response = paginated_api_call("SES", client, "list_identities", "Identities")
@@ -1393,6 +1567,7 @@ def research_ses(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_waf(client, skip_metrics=False):
     logger.info("=== Starting WAF Research ===")
     response = paginated_api_call("WAF", client, "list_web_acls", "WebACLs", Scope="REGIONAL")
@@ -1446,6 +1621,7 @@ def research_waf(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_kms(client, skip_metrics=False):
     logger.info("=== Starting KMS Research ===")
     response = paginated_api_call("KMS", client, "list_keys", "Keys")
@@ -1503,6 +1679,7 @@ def research_kms(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_elb(client, elbv2_client, skip_metrics=False):
     logger.info("=== Starting ELB Research ===")
     classic_response = paginated_api_call("ELB", client, "describe_load_balancers", "LoadBalancerDescriptions")
@@ -1587,6 +1764,7 @@ def research_elb(client, elbv2_client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_guardduty(client, skip_metrics=False):
     logger.info("=== Starting GuardDuty Research ===")
     response = paginated_api_call("GuardDuty", client, "list_detectors", "DetectorIds")
@@ -1625,6 +1803,7 @@ def research_guardduty(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_iam(client, skip_metrics=False):
     logger.info("=== Starting IAM Research ===")
     response = paginated_api_call("IAM", client, "list_policies", "Policies", Scope="Local")
@@ -1761,6 +1940,7 @@ def research_iam(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_firewall_manager(client, skip_metrics=False):
     logger.info("=== Starting Firewall Manager Research ===")
     response = paginated_api_call("Firewall Manager", client, "list_policies", "PolicyList")
@@ -1804,6 +1984,7 @@ def research_firewall_manager(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_ec2(client, cw_client, skip_metrics=False):
     logger.info("=== Starting EC2 Research ===")
     response = paginated_api_call("EC2", client, "describe_instances", "Reservations")
@@ -1811,7 +1992,10 @@ def research_ec2(client, cw_client, skip_metrics=False):
         return response
     instances = []
     for reservation in response.get("Reservations", []):
-        instances.extend(reservation.get("Instances", []))
+        if not isinstance(reservation, dict) or not isinstance(reservation.get("Instances"), list):
+            note_collection_failure("EC2: reservation instance collection missing or malformed")
+            continue
+        instances.extend(reservation["Instances"])
     logger.info(f"Found {len(instances)} EC2 instances to analyze")
     end_time = datetime.datetime.now(timezone.utc)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
@@ -1920,12 +2104,15 @@ def research_ec2(client, cw_client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_inspector(client, skip_metrics=False):
     logger.info("=== Starting Inspector Research ===")
     response = safe_api_call("Inspector", client.batch_get_account_status, accountIds=[account_id])
     if "error" in response:
         return response
     accounts = response.get("accounts", [])
+    if len(accounts) != 1 or not isinstance(accounts[0], dict) or accounts[0].get("accountId") != account_id:
+        note_collection_failure("Inspector: requested account status was not returned")
     account_status = accounts[0] if accounts else {}
     status = account_status.get("state", {}).get("status", "UNKNOWN")
     resource_state = account_status.get("resourceState", {})
@@ -1962,13 +2149,15 @@ def research_inspector(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_security_hub(client, skip_metrics=False):
     logger.info("=== Starting Security Hub Research ===")
     response = safe_api_call("Security Hub", client.describe_hub)
-    if "error" in response:
-        # Security Hub not enabled or access denied
+    if "error" in response or not isinstance(response.get("HubArn"), str) or not response["HubArn"]:
+        note_collection_failure("Security Hub: hub status could not be verified")
+        # An access error or malformed response cannot establish enablement.
         return {
-            "hub_status": "Not enabled or inaccessible",
+            "hub_status": "Unknown",
             "total_estimated_savings": 0,
             "general_recommendations": [
                 {
@@ -1986,6 +2175,7 @@ def research_security_hub(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_cloudtrail(client, skip_metrics=False):
     logger.info("=== Starting CloudTrail Research ===")
     response = safe_api_call("CloudTrail", client.describe_trails, includeShadowTrails=False)
@@ -2039,6 +2229,7 @@ def research_cloudtrail(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_cloudwatch(client, skip_metrics=False):
     logger.info("=== Starting CloudWatch Research ===")
     response = paginated_api_call("CloudWatch", client, "describe_alarms", ["MetricAlarms", "CompositeAlarms"])
@@ -2055,7 +2246,9 @@ def research_cloudwatch(client, skip_metrics=False):
         logger.debug(f"Processing CloudWatch alarm: {alarm_name[:30]}...")
 
         # Use the StateValue from the alarm object directly (not a nonexistent metric)
-        state_value = alarm.get("StateValue", "OK")
+        state_value = alarm.get("StateValue", "UNKNOWN")
+        if state_value not in {"OK", "ALARM", "INSUFFICIENT_DATA"}:
+            note_collection_failure("CloudWatch: alarm state missing or malformed")
 
         detail = {"alarm_name": alarm_name, "state": state_value, "estimated_savings": 0, "recommendations": []}
         if state_value == "ALARM":
@@ -2076,6 +2269,7 @@ def research_cloudwatch(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_rds(client, cw_client, skip_metrics=False):
     logger.info("=== Starting RDS Research ===")
     response = paginated_api_call("RDS", client, "describe_db_instances", "DBInstances")
@@ -2155,6 +2349,7 @@ def research_rds(client, cw_client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_codecommit(client, skip_metrics=False):
     logger.info("=== Starting CodeCommit Research ===")
     response = paginated_api_call("CodeCommit", client, "list_repositories", "repositories")
@@ -2204,6 +2399,7 @@ def research_codecommit(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_ecr(client, skip_metrics=False):
     logger.info("=== Starting ECR Research ===")
     response = paginated_api_call("ECR", client, "describe_repositories", "repositories")
@@ -2261,6 +2457,7 @@ def research_ecr(client, skip_metrics=False):
     }
 
 
+@inventory_collection
 def research_trusted_advisor(client, skip_metrics=False):
     logger.info("=== Starting Trusted Advisor Research ===")
     response = safe_api_call("Trusted Advisor", client.describe_trusted_advisor_checks, language="en")
@@ -2282,6 +2479,8 @@ def research_trusted_advisor(client, skip_metrics=False):
         logger.debug(f"Processing Trusted Advisor check: {check['name'][:30]}...")
         result = safe_api_call("Trusted Advisor", client.describe_trusted_advisor_check_result, checkId=check_id)
         recommendations = []
+        if not isinstance(result.get("result"), dict) or not result["result"].get("status"):
+            note_collection_failure("Trusted Advisor: check result missing or failed")
         if isinstance(result, dict) and "result" in result:
             flagged = result["result"].get("flaggedResources", [])
             if flagged:
@@ -2352,6 +2551,11 @@ service_map = {
 
 def research_service(service_name, research_func, client_names, skip_metrics=False):
     if shutdown_event.is_set():
+        with research_lock:
+            research["services"][service_name] = {
+                "inventory_complete": False,
+                "incomplete_reasons": ["Collection not started: interrupted"],
+            }
         return
     try:
         with client_creation_lock:
@@ -2367,7 +2571,11 @@ def research_service(service_name, research_func, client_names, skip_metrics=Fal
         safe_msg = sanitize_error_message(e)
         logger.error(f"Failed to research {service_name}: {safe_msg}")
         with research_lock:
-            research["services"][service_name] = {"error": safe_msg}
+            research["services"][service_name] = {
+                "error": safe_msg,
+                "inventory_complete": False,
+                "incomplete_reasons": ["Collection failed"],
+            }
 
 
 # ============================================================================
@@ -3591,19 +3799,10 @@ def _main(argv=None):
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else Path(__file__).resolve().parent / "output"
     base_name = f"govhawk_report_{timestamp}"
     report_data = dict(research)
-    incomplete_services = [
-        name
-        for name, result in research["services"].items()
-        if isinstance(result, dict) and ("error" in result or result.get("inventory_complete") is False)
-    ]
-    incomplete = (
-        bool(incomplete_services)
-        or run_inventory_budget.exhausted
-        or any(budget.exhausted for budget in inventory_budgets.values())
-    )
+    coverage = inventory_collection_summary(target_services, research["services"])
+    incomplete = not coverage["complete"]
     report_data["inventory_collection"] = {
-        "complete": not incomplete,
-        "incomplete_services": incomplete_services,
+        **coverage,
         "budget_exhausted_services": [name for name, budget in inventory_budgets.items() if budget.exhausted],
         "run_budget_exhausted": run_inventory_budget.exhausted,
         "limits_per_service": {

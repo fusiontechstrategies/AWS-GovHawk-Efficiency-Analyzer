@@ -3079,8 +3079,9 @@ def windows_report_directory_lock(path, sid=None):
     """Hold a non-reparse directory against replacement; set its DACL by handle."""
     if sys.platform != "win32":
         raise OSError("Windows report directory handles are unavailable on this platform")
-    import ctypes
-    from ctypes import wintypes
+    import ctypes.wintypes
+
+    wintypes = ctypes.wintypes
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     security = ctypes.WinDLL("advapi32", use_last_error=True)
@@ -3111,6 +3112,37 @@ def windows_report_directory_lock(path, sid=None):
         if not attributes[0] & 0x10 or attributes[0] & 0x400:
             raise PermissionError("Report directory must be a regular non-reparse directory")
         if sid:
+            # A replaced staging pathname must not be adopted merely because
+            # its DACL can be rewritten. Bind its owner before writing bytes.
+            owner, owner_descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+            security.GetSecurityInfo.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_int,
+                wintypes.DWORD,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            security.GetSecurityInfo.restype = wintypes.DWORD
+            security.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+            security.ConvertSidToStringSidW.restype = wintypes.BOOL
+            error = security.GetSecurityInfo(
+                handle, 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(owner_descriptor)
+            )
+            if error:
+                raise ctypes.WinError(error)
+            owner_text = wintypes.LPWSTR()
+            try:
+                if not security.ConvertSidToStringSidW(owner, ctypes.byref(owner_text)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if owner_text.value != sid:
+                    raise PermissionError("Report staging owner differs from its creator")
+            finally:
+                if owner_text:
+                    kernel.LocalFree(owner_text)
+                kernel.LocalFree(owner_descriptor)
             descriptor = ctypes.c_void_p()
             security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
                 wintypes.LPCWSTR,
@@ -3162,8 +3194,9 @@ def windows_private_report_directory(parent, sid):
     """Create the directory with its protected owner DACL already in place."""
     if sys.platform != "win32":
         raise OSError("Windows security APIs require Windows")
-    import ctypes
-    from ctypes import wintypes
+    import ctypes.wintypes
+
+    wintypes = ctypes.wintypes
 
     class SecurityAttributes(ctypes.Structure):
         _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p), ("inherit", wintypes.BOOL)]
@@ -3183,7 +3216,7 @@ def windows_private_report_directory(parent, sid):
     kernel.LocalFree.restype = ctypes.c_void_p
     descriptor = ctypes.c_void_p()
     if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        f"D:P(A;OICI;FA;;;{sid})", 1, ctypes.byref(descriptor), None
+        f"O:{sid}D:P(A;OICI;FA;;;{sid})", 1, ctypes.byref(descriptor), None
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -3251,7 +3284,8 @@ def private_report_file(output_path):
     try:
         with ExitStack() as locks:
             if os.name == "nt":
-                locks.enter_context(windows_report_directory_lock(parent))
+                for ancestor in reversed((parent, *parent.parents)):
+                    locks.enter_context(windows_report_directory_lock(ancestor))
             if os.name == "nt":
                 system32 = Path(os.environ["SystemRoot"]) / "System32"
                 identity = subprocess.run(  # nosec B603

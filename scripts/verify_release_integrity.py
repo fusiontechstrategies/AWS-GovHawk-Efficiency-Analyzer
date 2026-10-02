@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -80,9 +81,21 @@ def main():
     remote.add_argument("commit")
     args = parser.parse_args()
     if args.operation == "source":
-        from prepare_release import PACKAGE_FILES
-
-        verify_source(Path(__file__).resolve().parents[1], args.commit, PACKAGE_FILES)
+        root = Path(__file__).resolve().parents[1]
+        verify_source(root, args.commit, ["scripts/verify_release_integrity.py", "scripts/prepare_release.py"])
+        module = ast.parse((root / "scripts/prepare_release.py").read_text(encoding="utf-8"))
+        declarations = [
+            node
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "PACKAGE_FILES" for target in node.targets)
+        ]
+        if len(declarations) != 1:
+            raise ValueError("Expected one static reviewed source manifest")
+        files = ast.literal_eval(declarations[0].value)
+        if not isinstance(files, tuple) or not all(isinstance(name, str) for name in files):
+            raise ValueError("Source manifest must be a static tuple of paths")
+        verify_source(root, args.commit, files)
     elif args.operation == "assets":
         if args.expected == "-":
             print(json.dumps(manifest(args.directory), sort_keys=True, separators=(",", ":")))

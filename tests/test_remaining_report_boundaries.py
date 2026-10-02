@@ -67,6 +67,12 @@ class SmokeHandoffTests(unittest.TestCase):
             with self.assertRaises((PermissionError, OSError)), app.private_report_file(alias / "result.json"):
                 self.fail("A mutable alias must never enter the write context")
             self.assertEqual(list(target.iterdir()), [])
+            with (
+                self.assertRaises((PermissionError, OSError)),
+                app.private_report_file(alias / "missing-parent" / "result.json"),
+            ):
+                self.fail("An alias must never authorize creating a report parent")
+            self.assertEqual(list(target.iterdir()), [])
 
     def test_mutable_privileged_consumer_cannot_supply_release_handoff(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()

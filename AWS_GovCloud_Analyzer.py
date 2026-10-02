@@ -3681,8 +3681,8 @@ def private_report_file(output_path):
     # Keep the returned lexical path in the guarded chain. Resolving first would
     # erase a mutable junction/symlink alias that could be retargeted afterward.
     parent = requested.parent
-    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if sys.platform != "win32":
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with posix_private_report_file(parent, requested.name) as stream:
             yield stream
         return
@@ -3691,6 +3691,10 @@ def private_report_file(output_path):
         if os.name == "nt":
             sid = current_windows_sid()
             for ancestor in reversed((parent, *parent.parents)):
+                # New components are created only while the existing lexical
+                # parent is pinned and inspected, before following any alias.
+                if not ancestor.exists():
+                    ancestor.mkdir(mode=0o700)
                 locks.enter_context(
                     windows_report_directory_lock(ancestor, parent_sid=sid, require_user_owner=ancestor == parent)
                 )

@@ -2980,6 +2980,8 @@ def generate_service_details(story, data, styles):
 @contextmanager
 def windows_report_directory_lock(path, sid=None):
     """Hold a non-reparse directory against replacement; set its DACL by handle."""
+    if sys.platform != "win32":
+        raise OSError("Windows report directory handles are unavailable on this platform")
     import ctypes
     from ctypes import wintypes
 

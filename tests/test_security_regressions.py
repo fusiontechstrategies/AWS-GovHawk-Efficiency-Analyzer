@@ -247,8 +247,9 @@ class SecurityRegressionTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows directory sharing semantics")
     def test_windows_report_paths_cannot_be_replaced_during_write(self):
         with tempfile.TemporaryDirectory() as directory:
-            parent = Path(directory) / "reports"
-            parent.mkdir()
+            ancestor = Path(directory) / "ancestor"
+            parent = ancestor / "reports"
+            parent.mkdir(parents=True)
             output = parent / "report.json"
             with analyzer.private_report_file(output) as stream:
                 staging = next(parent.glob(".govhawk-private-*"))
@@ -256,9 +257,31 @@ class SecurityRegressionTests(unittest.TestCase):
                     staging.rename(parent / "replacement")
                 with self.assertRaises(PermissionError):
                     parent.rename(Path(directory) / "replaced-parent")
+                with self.assertRaises(PermissionError):
+                    ancestor.rename(Path(directory) / "replaced-ancestor")
                 stream.write(b"synthetic private report")
             self.assertEqual(output.read_bytes(), b"synthetic private report")
             self.assertEqual(list(parent.iterdir()), [output])
+
+    @unittest.skipUnless(os.name == "nt", "Windows owner security semantics")
+    def test_staging_owner_mismatch_is_rejected_before_dacl_adoption(self):
+        import csv
+
+        identity = subprocess.run(
+            [str(Path(os.environ["SYSTEMROOT"]) / "System32" / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        sid = next(csv.reader([identity.stdout.strip()]))[1]
+        with tempfile.TemporaryDirectory() as directory:
+            staging = analyzer.windows_private_report_directory(Path(directory), sid)
+            try:
+                with self.assertRaisesRegex(PermissionError, "owner differs"):
+                    with analyzer.windows_report_directory_lock(staging, "S-1-5-32-545"):
+                        self.fail("A mismatched owner must never be adopted")
+            finally:
+                staging.rmdir()
 
     def test_identical_mutation_of_both_builds_cannot_change_captured_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

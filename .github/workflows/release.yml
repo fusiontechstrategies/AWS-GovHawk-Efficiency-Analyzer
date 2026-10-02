@@ -186,7 +186,8 @@ jobs:
           PY
 
       - name: Install exact hash-locked smoke runtime dependencies
-        run: python -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r runtime-lock.txt
+        run: |
+          python -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r runtime-lock.txt
 
       - name: Exercise the exact standalone runtime
         env:

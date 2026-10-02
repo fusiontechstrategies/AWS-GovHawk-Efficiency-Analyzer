@@ -57,7 +57,7 @@ jobs:
           git -C verifier merge-base --is-ancestor "$SOURCE_COMMIT" origin/main
           git -C verifier merge-base --is-ancestor "$VERIFIER_COMMIT" origin/main
           gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > source-run.json
-          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN/artifacts" > source-artifacts.json
+          gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" > source-artifacts.json
           python -I - <<'PY'
           import json, os
           run = json.load(open('source-run.json'))
@@ -66,7 +66,9 @@ jobs:
           assert run['event'] == 'push' and run['conclusion'] == 'success'
           assert run['head_sha'] == os.environ['SOURCE_COMMIT']
           assert run['head_repository']['full_name'] == os.environ['GH_REPO']
-          candidates = [x for x in json.load(open('source-artifacts.json'))['artifacts'] if x['name'] == 'release-assets' and not x['expired']]
+          pages = json.load(open('source-artifacts.json'))
+          assert isinstance(pages, list) and pages
+          candidates = [x for page in pages for x in page['artifacts'] if x['name'] == 'release-assets' and not x['expired']]
           assert len(candidates) == 1
           assert isinstance(candidates[0]['id'], int) and candidates[0]['id'] > 0
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
@@ -110,6 +112,7 @@ jobs:
           python -I - <<'PY'
           import json, os
           subjects = json.load(open('subjects.json'))
+          assert json.load(open('source-run.json'))['head_branch'] == subjects['tag']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               for name in ('tag', 'version'):
                   print(name + '=' + subjects[name], file=out)
@@ -214,11 +217,43 @@ jobs:
         run: |
           set -euo pipefail
           python -I verifier/scripts/verify_release_integrity.py tag "$GH_REPO" "$RELEASE_TAG" "$SOURCE_COMMIT"
-          gh release create "$RELEASE_TAG" --repo "$GH_REPO" --draft --verify-tag --target "$SOURCE_COMMIT" --title "AWS GovHawk Efficiency Analyzer $RELEASE_TAG" --notes-file "source-data/.github/release-notes/$RELEASE_TAG.md" release-assets/*
-          gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft,isPrerelease,assets > release-state.json
+          created_id=""
+          cleanup_failed_new_draft() {
+            status=$?
+            if [[ "$status" -ne 0 && "$created_id" =~ ^[0-9]+$ ]]; then
+              if gh api "repos/$GH_REPO/releases/$created_id" > failed-draft.json 2>/dev/null; then
+                if CREATED_ID="$created_id" python -I - <<'PY'
+          import json, os
+          state = json.load(open('failed-draft.json'))
+          assert state['id'] == int(os.environ['CREATED_ID']) and state['draft'] is True
+          assert state['tag_name'] == os.environ['RELEASE_TAG']
+          assert state['target_commitish'] == os.environ['SOURCE_COMMIT']
+          PY
+                then
+                  gh api --method DELETE "repos/$GH_REPO/releases/$created_id" >/dev/null || true
+                fi
+              fi
+            fi
+            return "$status"
+          }
+          trap cleanup_failed_new_draft EXIT
+          RELEASE_TITLE="AWS GovHawk Efficiency Analyzer" python -I - <<'PY' > draft-request.json
+          import json, os
+          from pathlib import Path
+          tag = os.environ['RELEASE_TAG']
+          print(json.dumps({'tag_name': tag, 'target_commitish': os.environ['SOURCE_COMMIT'],
+                            'name': os.environ['RELEASE_TITLE'] + ' ' + tag,
+                            'body': Path('source-data/.github/release-notes/' + tag + '.md').read_text(),
+                            'draft': True, 'prerelease': False}))
+          PY
+          gh api --method POST "repos/$GH_REPO/releases" --input draft-request.json > draft-created.json
+          created_id="$(python -I -c 'import json; value=json.load(open("draft-created.json")); assert isinstance(value["id"], int) and value["id"] > 0 and value["draft"] is True; print(value["id"])')"
+          gh release upload "$RELEASE_TAG" --repo "$GH_REPO" release-assets/*
+          gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json databaseId,isDraft,isPrerelease,assets > release-state.json
           python -I - <<'PY'
           import json, os
           state = json.load(open('release-state.json'))
+          assert state['databaseId'] == json.load(open('draft-created.json'))['id']
           assert state['isDraft'] is True and state['isPrerelease'] is False
           assert {x['name'] for x in state['assets']} == set(json.loads(os.environ['EXPECTED_MANIFEST']))
           PY

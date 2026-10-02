@@ -693,14 +693,27 @@ def research_vpc(client, skip_metrics=False):
             )
         vpc_details.append(detail)
 
+    inventory_complete = (
+        not response.get("truncated")
+        and len(vpc_details) == len(vpcs)
+        and all(item["subnet_inventory_complete"] for item in vpc_details)
+    )
+    if not inventory_complete:
+        for detail in vpc_details:
+            for recommendation in detail["recommendations"]:
+                recommendation.pop("remediation_steps", None)
+            if detail["subnet_count"] == 0:
+                detail["recommendations"] = [
+                    {
+                        "description": "This VPC has no verified subnets, but the overall VPC inventory is incomplete. Finish inventory and dependency checks before considering cleanup."
+                    }
+                ]
     logger.info("=== Completed VPC Research ===")
     return {
         "vpc_count": len(vpcs),
         "vpcs_analyzed": len(vpc_details),
         "subnet_inventory_unknown_count": sum(not item["subnet_inventory_complete"] for item in vpc_details),
-        "inventory_complete": not response.get("truncated")
-        and len(vpc_details) == len(vpcs)
-        and all(item["subnet_inventory_complete"] for item in vpc_details),
+        "inventory_complete": inventory_complete,
         "vpc_details": vpc_details,
         "total_estimated_savings": 0,
         "general_recommendations": [

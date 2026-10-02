@@ -73,6 +73,7 @@ class SecurityRegressionTests(unittest.TestCase):
             result = analyzer.research_vpc(object())
         self.assertFalse(result["inventory_complete"])
         self.assertEqual(result["vpcs_analyzed"], 1)
+        self.assertNotIn("delete-vpc", json.dumps(result))
         with patch.object(analyzer, "paginated_api_call", side_effect=[{"Vpcs": [], "truncated": True}]):
             result = analyzer.research_vpc(object())
         self.assertFalse(result["inventory_complete"])

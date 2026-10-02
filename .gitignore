@@ -39,3 +39,6 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+
+# Private staging may remain after a process crash, at any output depth
+.govhawk-private-*/

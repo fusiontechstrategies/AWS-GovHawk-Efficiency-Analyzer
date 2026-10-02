@@ -68,7 +68,7 @@ class SecurityRegressionTests(unittest.TestCase):
         vpcs = [{"VpcId": "vpc-one"}, {"VpcId": "vpc-two"}]
         with (
             patch.object(analyzer, "paginated_api_call", side_effect=[{"Vpcs": vpcs}, {"Subnets": []}]),
-            patch.object(analyzer.shutdown_event, "is_set", side_effect=[False, True]),
+            patch.object(analyzer.shutdown_event, "is_set", side_effect=[False, True, True]),
         ):
             result = analyzer.research_vpc(object())
         self.assertFalse(result["inventory_complete"])

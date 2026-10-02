@@ -62,3 +62,16 @@ Keep identity values as data when using an SDK or an approved command runner.
 Release jobs invoke verifiers in Python isolated mode so tagged modules cannot
 shadow standard-library imports. Signed source review and release environment
 controls remain necessary to authorize the verifier code itself.
+
+All service results include `inventory_complete` and bounded `incomplete_reasons`.
+Nested query failures and partial service families remain incomplete even when
+other resources were collected successfully. Selected services without results
+and interrupted work also make the run incomplete. JSON and PDF use the same
+coverage decision. Interrupted runs retain exit code 130; other incomplete runs
+exit with code 3.
+
+Private `.govhawk-private-*` staging directories are ignored at every depth,
+including custom output paths. A crash can leave a protected staging directory
+behind. Review its ownership and contents under your retention policy before
+manual cleanup; do not add it to a commit. Git ignore rules are only an accidental
+disclosure guard, not access control.

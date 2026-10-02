@@ -29,13 +29,12 @@ import stat
 # Fixed OS executables use separate arguments and never invoke a shell.
 import subprocess  # nosec B404
 import sys
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
 from datetime import timezone
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from typing import Any
 
 import boto3
@@ -93,6 +92,88 @@ shutdown_event = threading.Event()
 # Lock for thread-safe dictionary updates
 research_lock = threading.Lock()
 client_creation_lock = threading.Lock()
+
+
+class InventoryBudgetExceeded(RuntimeError):
+    """Collection stopped; missing inventory must never be interpreted as safe."""
+
+
+class InventoryBudget:
+    """Bound requests, retained response bytes, list entries, and collection time."""
+
+    def __init__(self, requests=1000, items=2000, bytes_limit=4 * 1024 * 1024, seconds=300):
+        self.limits = (requests, items, bytes_limit, seconds)
+        self.requests = self.items = self.bytes = 0
+        self.started = monotonic()
+        self.exhausted = False
+        self.lock = threading.Lock()
+
+    def consume(self, response=None):
+        with self.lock:
+            requests, items, bytes_limit, seconds = self.limits
+            if self.exhausted or monotonic() - self.started >= seconds:
+                self.exhausted = True
+                raise InventoryBudgetExceeded("Inventory collection budget exhausted; results are incomplete")
+            if response is None:
+                self.requests += 1
+                excess = self.requests > requests
+            else:
+                # Iterative traversal and streaming encoding avoid constructing a second
+                # unbounded JSON representation of an inflated API response.
+                pending = [response]
+                while pending:
+                    value = pending.pop()
+                    if isinstance(value, dict):
+                        pending.extend(value.values())
+                    elif isinstance(value, list):
+                        self.items += len(value)
+                        if self.items > items:
+                            self.exhausted = True
+                            raise InventoryBudgetExceeded("Inventory item budget exhausted; results are incomplete")
+                        pending.extend(value)
+                for chunk in json.JSONEncoder(default=str).iterencode(response):
+                    self.bytes += len(chunk.encode("utf-8"))
+                    if self.bytes > bytes_limit:
+                        self.exhausted = True
+                        raise InventoryBudgetExceeded("Inventory byte budget exhausted; results are incomplete")
+                excess = False
+            if excess:
+                self.exhausted = True
+                raise InventoryBudgetExceeded("Inventory request budget exhausted; results are incomplete")
+
+
+inventory_budgets: dict[str, InventoryBudget] = {}
+inventory_budget_lock = threading.Lock()
+run_inventory_budget = InventoryBudget(requests=12000, items=30000, bytes_limit=32 * 1024 * 1024, seconds=900)
+
+
+class BudgetedClient:
+    """Wrap every AWS operation, including calls issued internally by paginators."""
+
+    def __init__(self, client, budget):
+        self.client, self.budget = client, budget
+
+    def __getattr__(self, name):
+        attribute = getattr(self.client, name)
+        if name not in self.client.meta.method_to_api_mapping:
+            return attribute
+
+        def bounded(**kwargs):
+            run_inventory_budget.consume()
+            self.budget.consume()
+            response = attribute(**kwargs)
+            self.budget.consume(response)
+            run_inventory_budget.consume(response)
+            return response
+
+        return bounded
+
+    def get_paginator(self, name):
+        paginator = self.client.get_paginator(name)
+        # Botocore binds the operation at paginator construction. Replace that
+        # binding so follow-up pages cannot bypass request or response budgets.
+        paginator._method = getattr(self, name)
+        return paginator
 
 
 # ============================================================================
@@ -169,7 +250,7 @@ def safe_api_call(service, func, suppress_errors=None, **kwargs):
 
 
 def paginated_api_call(service, client, operation_name, result_keys, **kwargs):
-    """Call an AWS list/describe operation and combine every result page."""
+    """Combine bounded pages; report truncation rather than silently omit inventory."""
     keys = [result_keys] if isinstance(result_keys, str) else list(result_keys)
     try:
         operation = getattr(client, operation_name)
@@ -177,7 +258,10 @@ def paginated_api_call(service, client, operation_name, result_keys, **kwargs):
             return safe_api_call(service, operation, **kwargs)
 
         combined: dict[str, Any] = {key: [] for key in keys}
+        page_budget = InventoryBudget()
         for page in client.get_paginator(operation_name).paginate(**kwargs):
+            page_budget.consume()
+            page_budget.consume(page)
             for key in keys:
                 values = page.get(key, [])
                 if isinstance(values, list):
@@ -186,6 +270,8 @@ def paginated_api_call(service, client, operation_name, result_keys, **kwargs):
                 combined["truncated"] = True
                 break
         return combined
+    except InventoryBudgetExceeded as e:
+        return {"error": str(e), "truncated": True}
     except ClientError as e:
         safe_msg = sanitize_error_message(e)
         logger.error(f"Error calling {service}: {safe_msg}")
@@ -202,11 +288,14 @@ def paginated_api_call(service, client, operation_name, result_keys, **kwargs):
 
 def create_aws_client(service_name, region=None):
     """Create a consistently configured low-level AWS client."""
-    return boto3.client(
+    client = boto3.client(
         service_name,
         region_name=region or str(research["region"]),
         config=AWS_CLIENT_CONFIG,
     )
+    with inventory_budget_lock:
+        budget = inventory_budgets.setdefault(service_name, InventoryBudget())
+    return BudgetedClient(client, budget)
 
 
 def get_cloudwatch_metric(
@@ -1245,8 +1334,16 @@ def research_ses(client, skip_metrics=False):
             detail["recommendations"].append(
                 {
                     "description": f"SES identity verification status is {verification_status}. Complete verification or remove the stale identity after confirming it is unused.",
-                    "remediation_steps": [
-                        f"aws ses delete-identity --identity {shell_quote(identity)} --region {shell_quote(region)}"
+                    # Argument data, never a shell string. SES email local-parts
+                    # can legitimately contain cmd.exe metacharacters.
+                    "remediation_arguments": [
+                        "aws",
+                        "ses",
+                        "delete-identity",
+                        "--identity",
+                        identity,
+                        "--region",
+                        region,
                     ],
                 }
             )
@@ -3061,6 +3158,85 @@ def windows_report_directory_lock(path, sid=None):
         kernel.CloseHandle(handle)
 
 
+def windows_private_report_directory(parent, sid):
+    """Create the directory with its protected owner DACL already in place."""
+    if sys.platform != "win32":
+        raise OSError("Windows security APIs require Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p), ("inherit", wintypes.BOOL)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    kernel.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
+    kernel.CreateDirectoryW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        f"D:P(A;OICI;FA;;;{sid})", 1, ctypes.byref(descriptor), None
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        staging = parent / (".govhawk-private-" + os.urandom(16).hex())
+        if not kernel.CreateDirectoryW(str(staging), ctypes.byref(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return staging
+    finally:
+        kernel.LocalFree(descriptor)
+
+
+@contextmanager
+def posix_private_report_file(parent, name):
+    """Pin directory inodes; publication and cleanup never re-resolve ancestors."""
+    if sys.platform == "win32":
+        raise OSError("POSIX directory descriptors are unavailable on Windows")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(parent, flags)
+    staging_fd = None
+    staging_name = ".govhawk-private-" + os.urandom(16).hex()
+    created = False
+    try:
+        info = os.fstat(parent_fd)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise PermissionError("Report parent must be owned by this user and not writable by others")
+        os.mkdir(staging_name, 0o700, dir_fd=parent_fd)
+        created = True
+        staging_fd = os.open(staging_name, flags, dir_fd=parent_fd)
+        fd = os.open("report", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=staging_fd)
+        with os.fdopen(fd, "w+b") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise PermissionError("Report temporary file is not owner-only")
+            yield stream
+            stream.flush()
+            os.fsync(stream.fileno())
+            named = os.stat("report", dir_fd=staging_fd, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+                raise PermissionError("Report inode changed before publication")
+            os.link("report", name, src_dir_fd=staging_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+    finally:
+        if staging_fd is not None:
+            try:
+                os.unlink("report", dir_fd=staging_fd)
+            except FileNotFoundError:
+                pass
+            os.close(staging_fd)
+        if created:
+            os.rmdir(staging_name, dir_fd=parent_fd)
+        os.close(parent_fd)
+
+
 @contextmanager
 def private_report_file(output_path):
     """Create an owner-only regular file before writing and publish without overwrite."""
@@ -3068,16 +3244,14 @@ def private_report_file(output_path):
     parent = requested.parent.resolve()
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if sys.platform != "win32":
-        info = parent.stat()
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
-            raise PermissionError("Report parent must be owned by this user and not writable by others")
+        with posix_private_report_file(parent, requested.name) as stream:
+            yield stream
+        return
     staging = temporary = None
     try:
         with ExitStack() as locks:
             if os.name == "nt":
                 locks.enter_context(windows_report_directory_lock(parent))
-            staging = Path(tempfile.mkdtemp(prefix=".govhawk-private-", dir=parent))
-            temporary = staging / "report"
             if os.name == "nt":
                 system32 = Path(os.environ["SystemRoot"]) / "System32"
                 identity = subprocess.run(  # nosec B603
@@ -3089,7 +3263,11 @@ def private_report_file(output_path):
                 sid = next(csv.reader([identity.stdout.strip()]))[1]
                 if not re.fullmatch(r"S-1-[0-9-]+", sid):
                     raise PermissionError("Cannot resolve current user SID")
+                staging = windows_private_report_directory(parent, sid)
+                temporary = staging / "report"
                 locks.enter_context(windows_report_directory_lock(staging, sid))
+            if temporary is None:
+                raise OSError("Cannot establish a protected Windows report directory")
             flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
             fd = os.open(temporary, flags, 0o600)
             with os.fdopen(fd, "w+b") as stream:
@@ -3115,6 +3293,13 @@ def generate_pdf_report(report_data, output_pdf_path):
     output_path = Path(output_pdf_path).expanduser().absolute()
     story: list[Any] = []
     build_title_page(story, report_data, styles)
+    if report_data.get("inventory_collection", {}).get("complete") is False:
+        story.append(
+            Paragraph(
+                "INCOMPLETE INVENTORY: collection limits were reached. Missing resources must not be treated as safe.",
+                styles["BodyText"],
+            )
+        )
     generate_executive_summary(story, report_data, styles)
     generate_service_details(story, report_data, styles)
     try:
@@ -3230,7 +3415,7 @@ def resolve_services(requested):
 
 
 def _main(argv=None):
-    global account_id, metric_lookback_days
+    global account_id, metric_lookback_days, run_inventory_budget
 
     args = parse_args(argv)
     logger.setLevel(logging.DEBUG if args.debug else logging.INFO)
@@ -3253,6 +3438,9 @@ def _main(argv=None):
         return 2
 
     shutdown_event.clear()
+    with inventory_budget_lock:
+        inventory_budgets.clear()
+        run_inventory_budget = InventoryBudget(requests=12000, items=30000, bytes_limit=32 * 1024 * 1024, seconds=900)
     if threading.current_thread() is threading.main_thread():
         signal.signal(signal.SIGINT, signal_handler)
 
@@ -3317,6 +3505,26 @@ def _main(argv=None):
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else Path(__file__).resolve().parent / "output"
     base_name = f"govhawk_report_{timestamp}"
     report_data = dict(research)
+    incomplete = run_inventory_budget.exhausted or any(budget.exhausted for budget in inventory_budgets.values())
+    report_data["inventory_collection"] = {
+        "complete": not incomplete,
+        "budget_exhausted_services": [name for name, budget in inventory_budgets.items() if budget.exhausted],
+        "run_budget_exhausted": run_inventory_budget.exhausted,
+        "limits_per_service": {
+            "requests": 1000,
+            "list_entries": 2000,
+            "response_bytes": 4 * 1024 * 1024,
+            "seconds": 300,
+        },
+        "limits_per_run": {
+            "requests": 12000,
+            "list_entries": 30000,
+            "response_bytes": 32 * 1024 * 1024,
+            "seconds": 900,
+        },
+    }
+    if incomplete:
+        logger.warning("Inventory collection budget exhausted. Report is incomplete; missing resources are not safe.")
     report_data["logo_path"] = args.logo
     output_paths = []
 
@@ -3337,7 +3545,7 @@ def _main(argv=None):
         print(f"Report saved to: {output_path}")
 
     logger.info("AWS GovCloud environment analysis completed")
-    return 130 if shutdown_event.is_set() else 0
+    return 130 if shutdown_event.is_set() else (3 if incomplete else 0)
 
 
 def main(argv=None):

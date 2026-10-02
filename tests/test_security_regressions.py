@@ -3,6 +3,9 @@
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +18,105 @@ from scripts import verify_release_integrity as integrity
 
 
 class SecurityRegressionTests(unittest.TestCase):
+    def test_ses_metacharacters_remain_argument_data(self):
+        identity = "test&whoami@example.invalid"
+        client = FakeClient(
+            "list_identities",
+            [{"Identities": [identity]}],
+            {
+                "get_identity_verification_attributes": {
+                    "VerificationAttributes": {identity: {"VerificationStatus": "Failed"}}
+                }
+            },
+        )
+        result = analyzer.research_ses(client)
+        recommendation = result["identity_details"][0]["recommendations"][0]
+        self.assertNotIn("remediation_cli", recommendation)
+        self.assertEqual(recommendation["remediation_arguments"][4], identity)
+
+    def test_request_budget_prevents_the_next_network_call(self):
+        from unittest.mock import Mock
+
+        client = Mock()
+        client.meta.method_to_api_mapping = {"list_items": "ListItems"}
+        client.list_items.return_value = {"Items": []}
+        wrapper = analyzer.BudgetedClient(client, analyzer.InventoryBudget(requests=1))
+        with patch.object(analyzer, "run_inventory_budget", analyzer.InventoryBudget()):
+            wrapper.list_items()
+            with self.assertRaises(analyzer.InventoryBudgetExceeded):
+                wrapper.list_items()
+        self.assertEqual(client.list_items.call_count, 1)
+
+    def test_real_sdk_paginator_cannot_bypass_operation_budget(self):
+        import boto3
+        from botocore.stub import Stubber
+
+        client = boto3.client(
+            "ec2", region_name="us-gov-west-1", aws_access_key_id="synthetic", aws_secret_access_key="synthetic"
+        )
+        with Stubber(client) as stubber, patch.object(analyzer, "run_inventory_budget", analyzer.InventoryBudget()):
+            stubber.add_response("describe_volumes", {"Volumes": [], "NextToken": "next"}, {})
+            wrapper = analyzer.BudgetedClient(client, analyzer.InventoryBudget(requests=1))
+            paginator = wrapper.get_paginator("describe_volumes")
+            with self.assertRaises(analyzer.InventoryBudgetExceeded):
+                list(paginator.paginate())
+            stubber.assert_no_pending_responses()
+
+    def test_item_byte_and_elapsed_budgets_fail_closed(self):
+        for budget, response in (
+            (analyzer.InventoryBudget(items=2), {"Items": [1, 2, 3]}),
+            (analyzer.InventoryBudget(bytes_limit=20), {"Content": "x" * 30}),
+            (analyzer.InventoryBudget(seconds=0), {}),
+        ):
+            with self.assertRaises(analyzer.InventoryBudgetExceeded):
+                budget.consume(response)
+            self.assertTrue(budget.exhausted)
+
+    def test_oversized_inventory_is_reported_incomplete(self):
+        client = FakeClient("list_items", [{"Items": list(range(2001))}])
+        response = analyzer.paginated_api_call("synthetic", client, "list_items", "Items")
+        self.assertTrue(response["truncated"])
+        self.assertIn("incomplete", response["error"])
+        self.assertNotIn("Items", response)
+
+    def test_privileged_verifier_ignores_tagged_stdlib_shadow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shutil.copyfile(Path(integrity.__file__), scripts / "verify_release_integrity.py")
+            (scripts / "json.py").write_text("raise RuntimeError('tag-controlled shadow executed')", encoding="utf-8")
+            assets = root / "assets"
+            assets.mkdir()
+            for index in range(5):
+                (assets / str(index)).write_bytes(b"synthetic")
+            result = subprocess.run(
+                [sys.executable, "-I", str(scripts / "verify_release_integrity.py"), "assets", str(assets), "-"],
+                cwd=root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(json.loads(result.stdout)), 5)
+
+    @unittest.skipIf(os.name == "nt", "POSIX directory descriptor semantics")
+    def test_replaced_ancestor_cannot_redirect_publication_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ancestor = Path(directory) / "ancestor"
+            parent = ancestor / "reports"
+            parent.mkdir(parents=True, mode=0o700)
+            moved = Path(directory) / "moved"
+            with analyzer.private_report_file(parent / "report.json") as stream:
+                stream.write(b"synthetic private report")
+                ancestor.rename(moved)
+                parent.mkdir(parents=True, mode=0o700)
+                bait = parent / "report.json"
+                bait.write_bytes(b"untouched")
+            self.assertEqual(bait.read_bytes(), b"untouched")
+            self.assertEqual((moved / "reports" / "report.json").read_bytes(), b"synthetic private report")
+            self.assertEqual(list((moved / "reports").iterdir()), [moved / "reports" / "report.json"])
+
     def test_notresource_and_notaction_are_not_reported_safe(self):
         for selector in ("Action", "NotAction"):
             client = FakeClient(

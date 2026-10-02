@@ -114,3 +114,45 @@ Resource progress events omit identifier values at DEBUG as well as INFO.
 Report and logo paths are not sent to logs. A logger filter and the CloudWatch
 formatter redact recognizable structured identifiers and absolute paths and
 discard traceback/stack attachments before rendering diagnostic records.
+
+Windows report ancestry is now walked one component at a time relative to retained
+directory handles. New parents, private staging and the report use `NtCreateFile`
+with no-reparse parsing; new objects have a protected owner DACL at creation.
+Publication links the open report handle to the retained output-parent handle
+without replacing an existing name. Cleanup deletes the original staging file
+and directory through those same handles. Pathname checks cannot authorize a
+different directory between validation and use. Native owned fixtures exercise
+an initially empty parent changed into a junction immediately before staging,
+plus successful publication, name collisions and cleanup after a forced error.
+
+The smoke consumer captures `/usr/bin/bwrap` and the base Python interpreter before
+selecting runtime wheels. It checks root ownership, mode and digest of the system
+launcher before installation and execution. Runtime wheels download as hash-bound
+data, then install offline inside that exact sandbox with only a disposable venv
+writable. The venv is never activated for system-tool lookup. Candidate Python is
+invoked by absolute path inside an empty-root, allowlisted, network-isolated boundary.
+Only system libraries, the captured base interpreter, the runtime and candidate
+are mounted. Host workspaces and pathname sockets such as Docker are absent;
+both installation and execution clear inherited environment variables.
+The synthetic wheel test proves a real `bwrap` console-script collision cannot
+choose the launcher. Restricted container namespace creation may fail; that is
+explicit failure from the system tool, never success supplied by a shadow script.
+
+The required native sandbox CI integration executes the actual workflow steps
+successfully. A real owned UNIX socket is connectable in the host control, then
+absent inside candidate execution; a synthetic inherited secret is also absent.
+That integration refuses namespace-creation failures rather than counting them
+as successful containment. Restricted local Docker tests retain their explicit
+limitation. No real host service sockets are contacted.
+
+The smoke consumer and its native integration use the same explicit Ubuntu22.04
+runner label because the current Ubuntu24 image refuses bubblewrap's loopback
+namespace initialization. No sysctl, AppArmor policy or capability is relaxed.
+The required native gate catches loss of namespace support. GitHub's published
+Ubuntu22 retirement date is April17,2027; migration requires the same successful
+native test on the replacement image before updating both labels:
+https://github.com/actions/runner-images/issues/14254
+Only the captured base interpreter's read-only lib directory is restored in
+LD_LIBRARY_PATH after clearenv, matching setup-python's shared-library needs.
+The synthetic wheel also installs a real .pth that checks socket/environment
+isolation when Python starts inside /runtime.

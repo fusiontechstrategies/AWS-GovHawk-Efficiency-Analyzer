@@ -3473,8 +3473,178 @@ def verify_windows_parent_security(handle, sid, require_user_owner=False):
         kernel.LocalFree(descriptor)
 
 
+class WindowsReportDirectoryGuard:
+    def __init__(self, handle, revalidate):
+        self.handle = handle
+        self.revalidate = revalidate
+
+    def __call__(self):
+        self.revalidate()
+
+
+def windows_relative_report_open(parent_handle, name, *, directory, create=False, sid=None):
+    """Open/create one component relative to an already authorized directory."""
+    if sys.platform != "win32":
+        raise OSError("Windows relative report handles require Windows")
+    if not name or name in {".", ".."} or any(char in name for char in "\\/:\x00"):
+        raise PermissionError("Report component must be a single ordinary filename")
+    import ctypes.wintypes
+
+    wintypes = ctypes.wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("length", wintypes.USHORT), ("maximum", wintypes.USHORT), ("buffer", wintypes.LPWSTR)]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG),
+            ("root", wintypes.HANDLE),
+            ("name", ctypes.POINTER(UnicodeString)),
+            ("attributes", wintypes.ULONG),
+            ("security", ctypes.c_void_p),
+            ("qos", ctypes.c_void_p),
+        ]
+
+    class IoStatus(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    native = ctypes.WinDLL("ntdll", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    native.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatus),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    ]
+    native.NtCreateFile.restype = wintypes.LONG
+    native.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    native.RtlNtStatusToDosError.restype = wintypes.ULONG
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    descriptor = ctypes.c_void_p()
+    if create and sid:
+        if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"O:{sid}D:P(A;OICI;FA;;;{sid})", 1, ctypes.byref(descriptor), None
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        text = ctypes.create_unicode_buffer(name)
+        length = len(name.encode("utf-16-le"))
+        if length > 65532:
+            raise PermissionError("Report component exceeds the Windows name budget")
+        unicode_name = UnicodeString(length, length + 2, ctypes.cast(text, wintypes.LPWSTR))
+        # DONT_REPARSE applies throughout parsing, not just to the last component.
+        attributes = ObjectAttributes(
+            ctypes.sizeof(ObjectAttributes),
+            parent_handle,
+            ctypes.pointer(unicode_name),
+            0x1040,
+            descriptor,
+            None,
+        )
+        handle, status = wintypes.HANDLE(), IoStatus()
+        access = (0x170081 if create else 0x120081) if directory else 0xC0110000
+        options = 0x200020 | (1 if directory else 0x40)
+        result = native.NtCreateFile(
+            ctypes.byref(handle),
+            access,
+            ctypes.byref(attributes),
+            ctypes.byref(status),
+            None,
+            0x10 if directory else 0x80,
+            3 if directory else 0,
+            2 if create else 1,
+            options,
+            None,
+            0,
+        )
+        if result < 0:
+            raise ctypes.WinError(native.RtlNtStatusToDosError(result))
+        return handle.value
+    finally:
+        if descriptor.value:
+            kernel.LocalFree(descriptor)
+
+
+def windows_publish_report_handle(report_handle, parent_handle, name):
+    """Create a no-overwrite link from the open file to the retained parent."""
+    if sys.platform != "win32":
+        raise OSError("Windows relative report publication requires Windows")
+    if not name or name in {".", ".."} or any(char in name for char in "\\/:\x00"):
+        raise PermissionError("Report name must be a single ordinary filename")
+    import ctypes.wintypes
+
+    wintypes = ctypes.wintypes
+
+    class LinkInformation(ctypes.Structure):
+        _fields_ = [
+            ("replace", wintypes.BOOLEAN),
+            ("root", wintypes.HANDLE),
+            ("length", wintypes.ULONG),
+            ("name", wintypes.WCHAR * 1),
+        ]
+
+    class IoStatus(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+    encoded = name.encode("utf-16-le")
+    buffer = ctypes.create_string_buffer(
+        max(ctypes.sizeof(LinkInformation), LinkInformation.name.offset + len(encoded))
+    )
+    info = LinkInformation.from_buffer(buffer)
+    info.replace, info.root, info.length = False, parent_handle, len(encoded)
+    ctypes.memmove(ctypes.addressof(buffer) + LinkInformation.name.offset, encoded, len(encoded))
+    native = ctypes.WinDLL("ntdll", use_last_error=True)
+    native.NtSetInformationFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatus),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        ctypes.c_int,
+    ]
+    native.NtSetInformationFile.restype = wintypes.LONG
+    native.RtlNtStatusToDosError.argtypes = [wintypes.LONG]
+    native.RtlNtStatusToDosError.restype = wintypes.ULONG
+    status = IoStatus()
+    result = native.NtSetInformationFile(report_handle, ctypes.byref(status), buffer, len(buffer), 11)
+    if result < 0:
+        raise ctypes.WinError(native.RtlNtStatusToDosError(result))
+
+
+def windows_delete_report_handle(handle):
+    """Delete this exact opened name when its handle closes."""
+    if sys.platform != "win32":
+        raise OSError("Windows report cleanup requires Windows")
+    import ctypes.wintypes
+
+    wintypes = ctypes.wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.SetFileInformationByHandle.restype = wintypes.BOOL
+    disposition = wintypes.BOOL(True)
+    if not kernel.SetFileInformationByHandle(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 @contextmanager
-def windows_report_directory_lock(path, sid=None, remove_on_exit=False, *, parent_sid=None, require_user_owner=False):
+def windows_report_directory_lock(
+    path, sid=None, remove_on_exit=False, *, parent_sid=None, require_user_owner=False, native_handle=None
+):
     """Hold a non-reparse directory against replacement; set its DACL by handle."""
     if sys.platform != "win32":
         raise OSError("Windows report directory handles are unavailable on this platform")
@@ -3505,18 +3675,22 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False, *, paren
     # LIST_DIRECTORY activates delete sharing conflicts. Write sharing is required
     # for NTFS publication. The caller pins the immediate child of every ancestor
     # through publication, so no guarded directory can be emptied and reparsed.
-    handle = kernel.CreateFileW(
-        str(path),
-        0x81 | (0x60000 if sid else 0) | (0x20000 if parent_sid else 0) | (0x10000 if remove_on_exit else 0),
-        3,
-        None,
-        3,
-        0x02200000,
-        None,
+    handle = (
+        native_handle
+        if native_handle is not None
+        else kernel.CreateFileW(
+            str(path),
+            0x81 | (0x60000 if sid else 0) | (0x20000 if parent_sid else 0) | (0x10000 if remove_on_exit else 0),
+            3,
+            None,
+            3,
+            0x02200000,
+            None,
+        )
     )
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
-    protected = False
+    protected = bool(native_handle is not None and sid and remove_on_exit)
     try:
         attributes = (wintypes.DWORD * 2)()
         if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
@@ -3612,7 +3786,7 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False, *, paren
 
         revalidate()
         protected = True
-        yield revalidate
+        yield WindowsReportDirectoryGuard(handle, revalidate)
     finally:
         try:
             if remove_on_exit and protected:
@@ -3777,45 +3951,70 @@ def private_report_file(output_path):
         with posix_private_report_file(parent, requested.name) as stream:
             yield stream
         return
-    staging = temporary = None
+    import ctypes.wintypes
+    import msvcrt
+
+    sid = current_windows_sid()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    kernel.CloseHandle.restype = ctypes.wintypes.BOOL
     with ExitStack() as locks:
         guards = []
-        if os.name == "nt":
-            sid = current_windows_sid()
-            for ancestor in reversed((parent, *parent.parents)):
-                # New components are created only while the existing lexical
-                # parent is pinned and inspected, before following any alias.
-                if not ancestor.exists():
-                    ancestor.mkdir(mode=0o700)
-                guards.append(
-                    locks.enter_context(
-                        windows_report_directory_lock(ancestor, parent_sid=sid, require_user_owner=ancestor == parent)
+        parent_guard = None
+        for ancestor in reversed((parent, *parent.parents)):
+            if parent_guard is None:
+                guard = locks.enter_context(windows_report_directory_lock(ancestor, parent_sid=sid))
+            else:
+                try:
+                    child = windows_relative_report_open(parent_guard.handle, ancestor.name, directory=True)
+                except FileNotFoundError:
+                    child = windows_relative_report_open(
+                        parent_guard.handle, ancestor.name, directory=True, create=True, sid=sid
+                    )
+                guard = locks.enter_context(
+                    windows_report_directory_lock(
+                        ancestor, parent_sid=sid, require_user_owner=ancestor == parent, native_handle=child
                     )
                 )
-        if os.name == "nt":
-            staging = windows_private_report_directory(parent, sid)
-            temporary = staging / "report"
-            guards.append(locks.enter_context(windows_report_directory_lock(staging, sid, remove_on_exit=True)))
-            locks.callback(temporary.unlink, missing_ok=True)
-        if temporary is None:
+            guards.append(guard)
+            parent_guard = guard
+        if parent_guard is None:
             raise OSError("Cannot establish a protected Windows report directory")
+        staging_name = ".govhawk-private-" + os.urandom(16).hex()
+        staging_handle = windows_relative_report_open(
+            parent_guard.handle, staging_name, directory=True, create=True, sid=sid
+        )
+        staging_guard = locks.enter_context(
+            windows_report_directory_lock(parent / staging_name, sid, remove_on_exit=True, native_handle=staging_handle)
+        )
+        guards.append(staging_guard)
         for guard in guards:
             guard()
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        fd = os.open(temporary, flags, 0o600)
+        report_handle = windows_relative_report_open(
+            staging_guard.handle, "report", directory=False, create=True, sid=sid
+        )
+        try:
+            fd = msvcrt.open_osfhandle(report_handle, os.O_RDWR | os.O_BINARY)
+        except BaseException:
+            try:
+                windows_delete_report_handle(report_handle)
+            finally:
+                kernel.CloseHandle(report_handle)
+            raise
+        # Ownership transfers to the CRT stream. Delete its original staging
+        # name through this same handle before it closes, never via pathname.
         with os.fdopen(fd, "w+b") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise PermissionError("Report temporary file is not regular")
-            if sys.platform != "win32" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
-                raise PermissionError("Report temporary file is not owner-only")
-            yield stream
-            stream.flush()
-            os.fsync(stream.fileno())
-            for guard in guards:
-                guard()
-            # Keep the file and directory handles open through publication.
-            os.link(temporary, parent / requested.name)
+            try:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise PermissionError("Report temporary file is not regular")
+                yield stream
+                stream.flush()
+                os.fsync(stream.fileno())
+                for guard in guards:
+                    guard()
+                windows_publish_report_handle(report_handle, parent_guard.handle, requested.name)
+            finally:
+                windows_delete_report_handle(report_handle)
 
 
 def generate_pdf_report(report_data, output_pdf_path):

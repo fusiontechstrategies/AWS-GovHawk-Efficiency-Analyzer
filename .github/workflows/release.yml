@@ -125,7 +125,8 @@ jobs:
   smoke:
     name: Smoke-test immutable assets on an isolated consumer
     needs: build
-    runs-on: ubuntu-latest
+    # Match the successful native namespace integration; no host policy changes.
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -159,6 +160,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
+          # Capture system boundaries before a selected wheel can install scripts.
+          python -I - <<'PY'
+          import hashlib, os, stat, sys
+          from pathlib import Path
+          launcher = Path('/usr/bin/bwrap')
+          info = launcher.lstat()
+          assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+          interpreter = Path(sys.executable).resolve(strict=True)
+          prefix = Path(sys.base_prefix).resolve(strict=True)
+          assert interpreter.is_absolute()
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              print('SMOKE_SANDBOX_PATH=' + str(launcher), file=out)
+              print('SMOKE_SANDBOX_SHA256=' + hashlib.sha256(launcher.read_bytes()).hexdigest(), file=out)
+              print('SMOKE_BASE_PYTHON=' + str(interpreter), file=out)
+              print('SMOKE_BASE_PREFIX=' + str(prefix), file=out)
+          PY
 
       - name: Obtain the exact signed source dependency lock as data
         env:
@@ -187,7 +204,33 @@ jobs:
 
       - name: Install exact hash-locked smoke runtime dependencies
         run: |
-          python -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r runtime-lock.txt
+          "$SMOKE_BASE_PYTHON" -I -m venv "$PWD/smoke-runtime"
+          # Download wheels as data outside isolation. Installing their .pth files,
+          # entry points or compile helpers runs only inside the captured sandbox.
+          "$SMOKE_BASE_PYTHON" -I -m pip download --disable-pip-version-check --only-binary=:all: --no-deps --require-hashes -r runtime-lock.txt --dest "$PWD/smoke-wheels"
+          "$SMOKE_BASE_PYTHON" -I - <<'PY'
+          import hashlib, os, stat
+          from pathlib import Path
+          launcher = Path(os.environ['SMOKE_SANDBOX_PATH'])
+          assert str(launcher) == '/usr/bin/bwrap'
+          info = launcher.lstat()
+          assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+          assert hashlib.sha256(launcher.read_bytes()).hexdigest() == os.environ['SMOKE_SANDBOX_SHA256']
+          PY
+          # Start with an empty filesystem. Host workspaces and pathname sockets,
+          # including /run/docker.sock, are not carried into either sandbox.
+          sandbox=("$SMOKE_SANDBOX_PATH" --unshare-all --die-with-parent --new-session --clearenv
+            --setenv HOME /tmp --setenv PATH /usr/bin:/bin
+            --setenv LD_LIBRARY_PATH "$SMOKE_BASE_PREFIX/lib" --tmpfs /
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64
+            --ro-bind "$SMOKE_BASE_PREFIX" "$SMOKE_BASE_PREFIX"
+            --ro-bind /etc/ssl /etc/ssl --ro-bind /etc/ld.so.cache /etc/ld.so.cache
+            --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
+          "${sandbox[@]}" --bind "$PWD/smoke-runtime" /runtime \
+            --ro-bind "$PWD/smoke-wheels" /wheels --ro-bind "$PWD/runtime-lock.txt" /runtime-lock.txt \
+            /runtime/bin/python -I -m pip install --no-index --no-cache-dir \
+            --find-links /wheels --disable-pip-version-check \
+            --only-binary=:all: --require-hashes -r /runtime-lock.txt
 
       - name: Exercise the exact standalone runtime
         env:
@@ -197,11 +240,29 @@ jobs:
           set -euo pipefail
           mkdir smoke-assets
           cp release-assets/*.py smoke-assets/
-          python_path="$(command -v python)"
-          candidate="$PWD/smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
-          # Read-only host mounts and isolated process/network namespaces prevent
-          # candidate execution from changing the verifier or release artifacts.
-          sandbox=(bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
+          # The base interpreter was captured before installation and has no
+          # selected runtime wheels or .pth files. Recheck the exact system tool.
+          "$SMOKE_BASE_PYTHON" -I - <<'PY'
+          import hashlib, os, stat
+          from pathlib import Path
+          launcher = Path(os.environ['SMOKE_SANDBOX_PATH'])
+          assert str(launcher) == '/usr/bin/bwrap'
+          info = launcher.lstat()
+          assert stat.S_ISREG(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022
+          assert hashlib.sha256(launcher.read_bytes()).hexdigest() == os.environ['SMOKE_SANDBOX_SHA256']
+          PY
+          python_path=/runtime/bin/python
+          candidate="/candidate/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
+          # Only the interpreter, runtime and candidate are visible. No host
+          # workspace, Docker socket, environment credentials or other services.
+          sandbox=("$SMOKE_SANDBOX_PATH" --unshare-all --die-with-parent --new-session --clearenv
+            --setenv HOME /tmp --setenv PATH /usr/bin:/bin
+            --setenv LD_LIBRARY_PATH "$SMOKE_BASE_PREFIX/lib" --tmpfs /
+            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64
+            --ro-bind "$SMOKE_BASE_PREFIX" "$SMOKE_BASE_PREFIX"
+            --ro-bind /etc/ssl /etc/ssl --ro-bind /etc/ld.so.cache /etc/ld.so.cache
+            --ro-bind "$PWD/smoke-runtime" /runtime --ro-bind "$PWD/smoke-assets" /candidate
+            --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
           test "$("${sandbox[@]}" "$python_path" -I "$candidate" --version)" = \
             "GovHawk $RELEASE_VERSION"
           "${sandbox[@]}" "$python_path" -I "$candidate" --help >/dev/null

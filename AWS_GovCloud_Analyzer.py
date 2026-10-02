@@ -3676,7 +3676,11 @@ def posix_private_report_file(parent, name):
 def private_report_file(output_path):
     """Create an owner-only regular file before writing and publish without overwrite."""
     requested = Path(output_path).expanduser().absolute()
-    parent = requested.parent.resolve()
+    if ".." in requested.parts:
+        raise PermissionError("Report path cannot contain parent traversal")
+    # Keep the returned lexical path in the guarded chain. Resolving first would
+    # erase a mutable junction/symlink alias that could be retargeted afterward.
+    parent = requested.parent
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if sys.platform != "win32":
         with posix_private_report_file(parent, requested.name) as stream:

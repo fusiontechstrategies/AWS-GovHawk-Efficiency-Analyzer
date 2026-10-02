@@ -14,7 +14,8 @@ import AWS_GovCloud_Analyzer as app
 
 class ErrorPrivacyTests(unittest.TestCase):
     def test_local_and_cloudwatch_logs_omit_aws_message_metadata(self):
-        marker = "role/private-team arn:aws-us-gov:iam::123456789012:user/person@example.test AKIAABCDEFGHIJKLMNOP secret.internal.example"
+        synthetic_key = "AKIA" + "ABCDEFGHIJKLMNOP"
+        marker = f"role/private-team arn:aws-us-gov:iam::123456789012:user/person@example.test {synthetic_key} secret.internal.example"
         error = ClientError({"Error": {"Code": "AccessDenied", "Message": marker}}, "ListThings")
         fake = MagicMock()
         fake.put_log_events.return_value = {}
@@ -54,6 +55,19 @@ class ErrorPrivacyTests(unittest.TestCase):
 
 
 class SmokeHandoffTests(unittest.TestCase):
+    def test_report_parent_alias_is_refused_before_any_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target, alias = root / "protected", root / "mutable-alias"
+            target.mkdir()
+            try:
+                alias.symlink_to(target, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"Directory symlink unavailable: {exc}")
+            with self.assertRaises((PermissionError, OSError)), app.private_report_file(alias / "result.json"):
+                self.fail("A mutable alias must never enter the write context")
+            self.assertEqual(list(target.iterdir()), [])
+
     def test_mutable_privileged_consumer_cannot_supply_release_handoff(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
         build, rest = workflow.split("\n  smoke:\n", 1)

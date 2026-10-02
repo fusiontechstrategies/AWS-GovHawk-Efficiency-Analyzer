@@ -57,6 +57,89 @@ class InventoryCompletenessTests(unittest.TestCase):
         self.assert_incomplete("ECS", result)
         self.assertEqual(result["cluster_details"], [])
 
+    def test_budget_wrapper_preserves_operation_validation(self):
+        class RawS3:
+            meta = SimpleNamespace(method_to_api_mapping={"list_buckets": "ListBuckets"})
+
+            def list_buckets(self, **kwargs):
+                return {"Owner": {"ID": "synthetic"}}
+
+        wrapped = analyzer.BudgetedClient(RawS3(), analyzer.InventoryBudget())
+        self.assertEqual(wrapped.list_buckets.__name__, "list_buckets")
+        self.assert_incomplete("S3", analyzer.research_s3(wrapped, object(), skip_metrics=True))
+
+    def test_nested_sdk_response_shape_is_checked_offline(self):
+        from botocore.session import Session
+
+        class RawS3:
+            meta = SimpleNamespace(
+                method_to_api_mapping={"list_buckets": "ListBuckets"},
+                service_model=Session().get_service_model("s3"),
+            )
+
+            def list_buckets(self, **kwargs):
+                return {"Buckets": [{"Name": 123}]}
+
+        wrapped = analyzer.BudgetedClient(RawS3(), analyzer.InventoryBudget())
+        self.assert_incomplete("S3", analyzer.research_s3(wrapped, object(), skip_metrics=True))
+
+    def test_ec2_reservation_missing_instances_is_not_empty_inventory(self):
+        result = analyzer.research_ec2(
+            FakeClient("describe_instances", [{"Reservations": [{}]}]), object(), skip_metrics=True
+        )
+        self.assert_incomplete("EC2", result)
+
+    def test_ecs_missing_resource_counts_never_means_empty(self):
+        client = FakeClient(
+            "list_clusters",
+            [{"clusterArns": ["arn:synthetic/cluster"]}],
+            {
+                "describe_clusters": {"clusters": [{"status": "ACTIVE"}]},
+                "list_services": {"serviceArns": []},
+            },
+        )
+        result = analyzer.research_ecs(client)
+        self.assert_incomplete("ECS", result)
+        self.assertEqual(result["cluster_details"], [])
+        client.direct_responses["describe_clusters"]["clusters"][0].update(
+            {
+                "registeredContainerInstancesCount": 0,
+                "runningTasksCount": 0,
+            }
+        )
+        self.assertTrue(analyzer.research_ecs(client)["inventory_complete"])
+
+    def test_missing_public_policy_boolean_is_unknown(self):
+        client = FakeClient(
+            "list_buckets",
+            [{"Buckets": [{"Name": "synthetic"}]}],
+            {
+                "get_bucket_location": {"LocationConstraint": "us-gov-west-1"},
+                "get_bucket_lifecycle_configuration": {"Rules": []},
+                "get_bucket_policy_status": {"PolicyStatus": {}},
+                "get_bucket_acl": {"Grants": []},
+                "get_public_access_block": {"PublicAccessBlockConfiguration": {}},
+                "get_bucket_encryption": {"ServerSideEncryptionConfiguration": {"Rules": []}},
+            },
+        )
+        analyzer.research["region"] = "us-gov-west-1"
+        result = analyzer.research_s3(client, object(), skip_metrics=True)
+        self.assert_incomplete("S3", result)
+        self.assertIsNone(result["bucket_details"][0]["is_public"])
+
+    def test_missing_alarm_state_is_unknown(self):
+        result = analyzer.research_cloudwatch(
+            FakeClient("describe_alarms", [{"MetricAlarms": [{"AlarmName": "synthetic"}], "CompositeAlarms": []}])
+        )
+        self.assert_incomplete("CloudWatch", result)
+        self.assertEqual(result["alarm_details"][0]["state"], "UNKNOWN")
+
+    def test_inspector_missing_requested_account_is_incomplete(self):
+        result = analyzer.research_inspector(
+            FakeClient("batch_get_account_status", [{"accounts": [], "failedAccounts": []}])
+        )
+        self.assert_incomplete("Inspector", result)
+
     def test_failed_elb_family_retains_successful_family_and_names_failure(self):
         for failed_classic in (False, True):
             classic = FakeClient("describe_load_balancers", [{"LoadBalancerDescriptions": []}])

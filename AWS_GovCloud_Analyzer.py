@@ -42,6 +42,8 @@ from typing import Any
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
+from botocore.model import ServiceModel
+from botocore.validate import validate_parameters
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
@@ -160,10 +162,17 @@ class BudgetedClient:
         if name not in self.client.meta.method_to_api_mapping:
             return attribute
 
+        @wraps(attribute)
         def bounded(**kwargs):
             run_inventory_budget.consume()
             self.budget.consume()
             response = attribute(**kwargs)
+            model = getattr(self.client.meta, "service_model", None)
+            if isinstance(model, ServiceModel):
+                operation = model.operation_model(self.client.meta.method_to_api_mapping[name])
+                validate_parameters(
+                    {key: value for key, value in response.items() if key != "ResponseMetadata"}, operation.output_shape
+                )
             self.budget.consume(response)
             run_inventory_budget.consume(response)
             return response
@@ -623,7 +632,12 @@ def research_s3(client, cw_client, skip_metrics=False):
         else:
             lifecycle_enabled = any(rule.get("Status") == "Enabled" for rule in lifecycle.get("Rules", []))
 
-        policy_verified = "error" not in policy_status
+        policy_verified = "error" not in policy_status and (
+            policy_status.get("suppressed_error") == "NoSuchBucketPolicy"
+            or isinstance(policy_status.get("PolicyStatus", {}).get("IsPublic"), bool)
+        )
+        if not policy_verified:
+            note_collection_failure("S3: bucket public-policy status could not be verified")
         policy_public = bool(policy_status.get("PolicyStatus", {}).get("IsPublic")) if policy_verified else False
         public_group_uris = {
             "http://acs.amazonaws.com/groups/global/AllUsers",
@@ -1146,7 +1160,17 @@ def research_ecs(client, skip_metrics=False):
             continue
 
         described = cluster.get("clusters")
-        if not isinstance(described, list) or len(described) != 1 or not isinstance(described[0], dict):
+        if (
+            not isinstance(described, list)
+            or len(described) != 1
+            or not isinstance(described[0], dict)
+            or not all(
+                isinstance(described[0].get(key), int)
+                and not isinstance(described[0][key], bool)
+                and described[0][key] >= 0
+                for key in ("registeredContainerInstancesCount", "runningTasksCount")
+            )
+        ):
             note_collection_failure("ECS: describe_clusters did not return the requested cluster")
             continue
         cluster_info = described[0]
@@ -1968,7 +1992,10 @@ def research_ec2(client, cw_client, skip_metrics=False):
         return response
     instances = []
     for reservation in response.get("Reservations", []):
-        instances.extend(reservation.get("Instances", []))
+        if not isinstance(reservation, dict) or not isinstance(reservation.get("Instances"), list):
+            note_collection_failure("EC2: reservation instance collection missing or malformed")
+            continue
+        instances.extend(reservation["Instances"])
     logger.info(f"Found {len(instances)} EC2 instances to analyze")
     end_time = datetime.datetime.now(timezone.utc)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
@@ -2084,6 +2111,8 @@ def research_inspector(client, skip_metrics=False):
     if "error" in response:
         return response
     accounts = response.get("accounts", [])
+    if len(accounts) != 1 or not isinstance(accounts[0], dict) or accounts[0].get("accountId") != account_id:
+        note_collection_failure("Inspector: requested account status was not returned")
     account_status = accounts[0] if accounts else {}
     status = account_status.get("state", {}).get("status", "UNKNOWN")
     resource_state = account_status.get("resourceState", {})
@@ -2217,7 +2246,9 @@ def research_cloudwatch(client, skip_metrics=False):
         logger.debug(f"Processing CloudWatch alarm: {alarm_name[:30]}...")
 
         # Use the StateValue from the alarm object directly (not a nonexistent metric)
-        state_value = alarm.get("StateValue", "OK")
+        state_value = alarm.get("StateValue", "UNKNOWN")
+        if state_value not in {"OK", "ALARM", "INSUFFICIENT_DATA"}:
+            note_collection_failure("CloudWatch: alarm state missing or malformed")
 
         detail = {"alarm_name": alarm_name, "state": state_value, "estimated_savings": 0, "recommendations": []}
         if state_value == "ALARM":

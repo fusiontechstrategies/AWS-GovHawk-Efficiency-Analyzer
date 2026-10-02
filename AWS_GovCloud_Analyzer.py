@@ -32,7 +32,7 @@ import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import timezone
 from pathlib import Path
 from time import sleep
@@ -2978,6 +2978,88 @@ def generate_service_details(story, data, styles):
 
 
 @contextmanager
+def windows_report_directory_lock(path, sid=None):
+    """Hold a non-reparse directory against replacement; set its DACL by handle."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    # READ_ATTRIBUTES, optionally WRITE_DAC. Share read/write but never delete.
+    handle = kernel.CreateFileW(str(path), 0x80 | (0x60000 if sid else 0), 3, None, 3, 0x02200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        attributes = (wintypes.DWORD * 2)()
+        if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not attributes[0] & 0x10 or attributes[0] & 0x400:
+            raise PermissionError("Report directory must be a regular non-reparse directory")
+        if sid:
+            descriptor = ctypes.c_void_p()
+            security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.c_void_p,
+            ]
+            security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+            security.GetSecurityDescriptorDacl.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(wintypes.BOOL),
+                ctypes.POINTER(ctypes.c_void_p),
+                ctypes.POINTER(wintypes.BOOL),
+            ]
+            security.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+            security.SetSecurityInfo.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_int,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            security.SetSecurityInfo.restype = wintypes.DWORD
+            if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                f"D:P(A;OICI;FA;;;{sid})", 1, ctypes.byref(descriptor), None
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                present, defaulted, dacl = wintypes.BOOL(), wintypes.BOOL(), ctypes.c_void_p()
+                if not security.GetSecurityDescriptorDacl(
+                    descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+                ):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not present.value or not dacl.value:
+                    raise PermissionError("Missing report protection DACL")
+                error = security.SetSecurityInfo(handle, 1, 0x80000004, None, None, dacl, None)
+                if error:
+                    raise ctypes.WinError(error)
+            finally:
+                kernel.LocalFree(descriptor)
+        yield
+    finally:
+        kernel.CloseHandle(handle)
+
+
+@contextmanager
 def private_report_file(output_path):
     """Create an owner-only regular file before writing and publish without overwrite."""
     requested = Path(output_path).expanduser().absolute()
@@ -2987,39 +3069,43 @@ def private_report_file(output_path):
         info = parent.stat()
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
             raise PermissionError("Report parent must be owned by this user and not writable by others")
-    staging = Path(tempfile.mkdtemp(prefix=".govhawk-private-", dir=parent))
-    temporary = staging / "report"
+    staging = temporary = None
     try:
-        if os.name == "nt":
-            system32 = Path(os.environ["SystemRoot"]) / "System32"
-            identity = subprocess.run(  # nosec B603
-                [str(system32 / "whoami.exe"), "/user", "/fo", "csv", "/nh"], check=True, capture_output=True, text=True
-            )  # noqa: S603
-            sid = next(csv.reader([identity.stdout.strip()]))[1]
-            if not re.fullmatch(r"S-1-[0-9-]+", sid):
-                raise PermissionError("Cannot resolve current user SID")
-            # SID is validated and the generated staging path is one argument.
-            subprocess.run(  # nosec B603
-                [str(system32 / "icacls.exe"), str(staging), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],
-                check=True,
-                capture_output=True,
-            )  # noqa: S603
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        fd = os.open(temporary, flags, 0o600)
-        with os.fdopen(fd, "w+b") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise PermissionError("Report temporary file is not regular")
-            if sys.platform != "win32" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
-                raise PermissionError("Report temporary file is not owner-only")
-            yield stream
-            stream.flush()
-            os.fsync(stream.fileno())
-        # Linking fails if any final entry exists, including a symlink or hard link.
-        os.link(temporary, parent / requested.name)
+        with ExitStack() as locks:
+            if os.name == "nt":
+                locks.enter_context(windows_report_directory_lock(parent))
+            staging = Path(tempfile.mkdtemp(prefix=".govhawk-private-", dir=parent))
+            temporary = staging / "report"
+            if os.name == "nt":
+                system32 = Path(os.environ["SystemRoot"]) / "System32"
+                identity = subprocess.run(  # nosec B603
+                    [str(system32 / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )  # noqa: S603
+                sid = next(csv.reader([identity.stdout.strip()]))[1]
+                if not re.fullmatch(r"S-1-[0-9-]+", sid):
+                    raise PermissionError("Cannot resolve current user SID")
+                locks.enter_context(windows_report_directory_lock(staging, sid))
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+            fd = os.open(temporary, flags, 0o600)
+            with os.fdopen(fd, "w+b") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise PermissionError("Report temporary file is not regular")
+                if sys.platform != "win32" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                    raise PermissionError("Report temporary file is not owner-only")
+                yield stream
+                stream.flush()
+                os.fsync(stream.fileno())
+                # Keep the file and directory handles open through publication.
+                os.link(temporary, parent / requested.name)
     finally:
-        temporary.unlink(missing_ok=True)
-        staging.rmdir()
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if staging is not None:
+            staging.rmdir()
 
 
 def generate_pdf_report(report_data, output_pdf_path):

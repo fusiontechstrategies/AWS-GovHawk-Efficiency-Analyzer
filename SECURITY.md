@@ -34,6 +34,10 @@ interrupted runs. A later invocation must opt in separately.
 Reports are written through exclusive regular-file descriptors in a private
 staging directory. POSIX reports have mode 0600 before content is written. On
 Windows, an owner-only NTFS ACL is established before creating the report file.
+The parent and staging directory are held through non-reparse Win32 handles
+without delete sharing. The staging DACL is applied to the open handle, and the
+report remains open through hard-link publication so pathname replacement cannot
+redirect a sensitive write. A conflicting directory handle aborts generation.
 Protection setup failure aborts generation. Existing final entries, including
 links, are never overwritten. POSIX output parents must belong to the current
 user and must not be writable by other users.

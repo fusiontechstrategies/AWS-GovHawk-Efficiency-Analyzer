@@ -142,6 +142,35 @@ class SecurityRegressionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 integrity.verify_assets(root, expected)
 
+    @unittest.skipUnless(os.name == "nt", "Windows directory sharing semantics")
+    def test_windows_report_paths_cannot_be_replaced_during_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "reports"
+            parent.mkdir()
+            output = parent / "report.json"
+            with analyzer.private_report_file(output) as stream:
+                staging = next(parent.glob(".govhawk-private-*"))
+                with self.assertRaises(PermissionError):
+                    staging.rename(parent / "replacement")
+                with self.assertRaises(PermissionError):
+                    parent.rename(Path(directory) / "replaced-parent")
+                stream.write(b"synthetic private report")
+            self.assertEqual(output.read_bytes(), b"synthetic private report")
+            self.assertEqual(list(parent.iterdir()), [output])
+
+    def test_identical_mutation_of_both_builds_cannot_change_captured_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            roots = [Path(directory) / "first", Path(directory) / "repeat"]
+            for root in roots:
+                root.mkdir()
+                for index in range(5):
+                    (root / str(index)).write_bytes(b"source-derived")
+            captured = integrity.manifest(roots[0])
+            for root in roots:
+                (root / "0").write_bytes(b"identical substituted bytes")
+                with self.assertRaises(ValueError):
+                    integrity.verify_assets(root, captured)
+
     def test_retargeted_annotated_release_tag_is_rejected(self):
         responses = [
             json.dumps({"object": {"type": "tag", "sha": "b" * 40}}).encode(),

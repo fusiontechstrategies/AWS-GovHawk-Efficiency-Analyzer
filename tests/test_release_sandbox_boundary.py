@@ -1,11 +1,13 @@
 """Execute actual smoke shell steps with a harmless shadowing wheel."""
 
 import base64
+import contextlib
 import csv
 import hashlib
 import io
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -31,8 +33,14 @@ def shell_step(name):
 @unittest.skipUnless(sys.platform == "linux" and Path("/usr/bin/bwrap").is_file(), "Linux system bubblewrap fixture")
 class ReleaseSandboxBoundary(unittest.TestCase):
     def test_selected_wheel_script_cannot_choose_the_system_sandbox(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory, contextlib.ExitStack() as resources:
             root = Path(directory)
+            socket_path = root / "host-control.sock"
+            control_socket = resources.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+            control_socket.bind(str(socket_path))
+            control_socket.listen(2)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control_client:
+                control_client.connect(str(socket_path))
             files = {
                 "boundary_fixture.py": b'def main():\n    print("SHADOWED_SANDBOX")\n',
                 "boundary_fixture-1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: boundary-fixture\nVersion: 1.0\n",
@@ -51,10 +59,16 @@ class ReleaseSandboxBoundary(unittest.TestCase):
                 for name, value in files.items():
                     archive.writestr(name, value)
             (root / "runtime-lock.txt").write_text(
-                str(wheel) + " --hash=sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest() + "\n"
+                "boundary-fixture==1.0 --hash=sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest() + "\n"
             )
             environment = os.environ.copy()
-            environment.update(GITHUB_ENV=str(root / "captured-env"), PIP_NO_INDEX="1", RELEASE_VERSION="0")
+            environment.update(
+                GITHUB_ENV=str(root / "captured-env"),
+                PIP_NO_INDEX="1",
+                PIP_FIND_LINKS=str(root),
+                RELEASE_VERSION="0",
+                SANDBOX_HOST_SECRET="synthetic-private-environment",
+            )
             capture = shell_step("Install isolated runtime test sandbox")
             # Tool installation occurs in the fixture image. Execute the actual
             # workflow capture code without issuing sudo/apt from a test.
@@ -109,6 +123,8 @@ class ReleaseSandboxBoundary(unittest.TestCase):
                 check=False,
             )
             if completed.returncode:
+                if os.environ.get("REQUIRE_NATIVE_SANDBOX") == "1":
+                    self.fail("Required native installation sandbox failed: " + completed.stderr)
                 self.assertIn("bwrap:", completed.stderr)
                 self.assertTrue(
                     any(
@@ -143,7 +159,16 @@ class ReleaseSandboxBoundary(unittest.TestCase):
             assets = root / "release-assets"
             assets.mkdir()
             (assets / "AWS-GovHawk-Efficiency-Analyzer-v0.py").write_text(
-                'import sys\nif "--version" in sys.argv: print("GovHawk 0")\n'
+                "import os, socket, sys\n"
+                "assert 'SANDBOX_HOST_SECRET' not in os.environ\n"
+                "assert not os.path.exists('/run/docker.sock')\n"
+                "assert not os.path.exists('/var/run/docker.sock')\n"
+                "client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                "try:\n"
+                f"    client.connect({str(socket_path)!r})\n"
+                "except (FileNotFoundError, PermissionError):\n    pass\n"
+                "else:\n    raise AssertionError('host control socket exposed')\n"
+                'if "--version" in sys.argv: print("GovHawk 0")\n'
             )
             exercise = subprocess.run(
                 [shutil.which("bash"), "-euo", "pipefail", "-c", shell_step("Exercise the exact standalone runtime")],
@@ -157,6 +182,8 @@ class ReleaseSandboxBoundary(unittest.TestCase):
             # Restricted containers can deny namespace creation. That is a real
             # system launcher failure, never success supplied by the shadow.
             if exercise.returncode:
+                if os.environ.get("REQUIRE_NATIVE_SANDBOX") == "1":
+                    self.fail("Required native socket/environment isolation failed: " + exercise.stderr)
                 self.assertIn("bwrap:", exercise.stderr)
                 self.assertTrue(
                     any(

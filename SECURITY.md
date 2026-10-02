@@ -130,7 +130,17 @@ selecting runtime wheels. It checks root ownership, mode and digest of the syste
 launcher before installation and execution. Runtime wheels download as hash-bound
 data, then install offline inside that exact sandbox with only a disposable venv
 writable. The venv is never activated for system-tool lookup. Candidate Python is
-invoked by absolute path inside the same read-only, network-isolated boundary.
+invoked by absolute path inside an empty-root, allowlisted, network-isolated boundary.
+Only system libraries, the captured base interpreter, the runtime and candidate
+are mounted. Host workspaces and pathname sockets such as Docker are absent;
+both installation and execution clear inherited environment variables.
 The synthetic wheel test proves a real `bwrap` console-script collision cannot
 choose the launcher. Restricted container namespace creation may fail; that is
 explicit failure from the system tool, never success supplied by a shadow script.
+
+The required native sandbox CI integration executes the actual workflow steps
+successfully. A real owned UNIX socket is connectable in the host control, then
+absent inside candidate execution; a synthetic inherited secret is also absent.
+That integration refuses namespace-creation failures rather than counting them
+as successful containment. Restricted local Docker tests retain their explicit
+limitation. No real host service sockets are contacted.

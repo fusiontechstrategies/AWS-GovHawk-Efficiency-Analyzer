@@ -149,3 +149,25 @@ jobs:
           path: release-candidate/
           if-no-files-found: error
           retention-days: 30
+
+  native-release-sandbox:
+    name: Native release sandbox isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install system sandbox for the native integration
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Prove successful runtime installation and host socket isolation
+        env:
+          REQUIRE_NATIVE_SANDBOX: "1"
+        run: python -I -m unittest discover -s tests -p test_release_sandbox_boundary.py -v

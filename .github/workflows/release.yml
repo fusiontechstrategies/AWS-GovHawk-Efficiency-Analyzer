@@ -69,6 +69,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-release-lock.txt
 
       - name: Build exact release assets twice
+        id: assets
         env:
           RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
           RELEASE_VERSION: ${{ steps.identity.outputs.version }}
@@ -95,6 +96,13 @@ jobs:
             cmp --silent "$artifact" "repeat-release-assets/${artifact##*/}"
           done
           test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 5
+          expected="$(python scripts/verify_release_integrity.py assets release-assets -)"
+          echo "manifest=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Install isolated runtime test sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
 
       - name: Exercise the exact standalone runtime
         env:
@@ -104,22 +112,28 @@ jobs:
           set -euo pipefail
           mkdir smoke-assets
           cp release-assets/*.py smoke-assets/
-          test "$(python "smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --version)" = \
+          python_path="$(command -v python)"
+          candidate="$PWD/smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py"
+          # Read-only host mounts and isolated process/network namespaces prevent
+          # candidate execution from changing the verifier or release artifacts.
+          sandbox=(bwrap --unshare-all --die-with-parent --new-session --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp)
+          test "$("${sandbox[@]}" "$python_path" "$candidate" --version)" = \
             "GovHawk $RELEASE_VERSION"
-          python "smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --help >/dev/null
-          python "smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --list-services >/dev/null
+          "${sandbox[@]}" "$python_path" "$candidate" --help >/dev/null
+          "${sandbox[@]}" "$python_path" "$candidate" --list-services >/dev/null
 
       - name: Revalidate source and exact final bytes
         id: final
         env:
           RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+          EXPECTED_MANIFEST: ${{ steps.assets.outputs.manifest }}
         shell: bash
         run: |
           set -euo pipefail
           python scripts/verify_release_integrity.py source "$RELEASE_COMMIT"
-          expected="$(python scripts/verify_release_integrity.py assets repeat-release-assets -)"
-          python scripts/verify_release_integrity.py assets release-assets "$expected"
-          echo "manifest=$expected" >> "$GITHUB_OUTPUT"
+          python scripts/verify_release_integrity.py assets repeat-release-assets "$EXPECTED_MANIFEST"
+          python scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
+          echo "manifest=$EXPECTED_MANIFEST" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the exact release assets
         id: upload

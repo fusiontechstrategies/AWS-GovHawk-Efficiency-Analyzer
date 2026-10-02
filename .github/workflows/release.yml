@@ -22,6 +22,8 @@ jobs:
     outputs:
       commit: ${{ steps.identity.outputs.commit }}
       version: ${{ steps.identity.outputs.version }}
+      manifest: ${{ steps.final.outputs.manifest }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,7 +66,7 @@ jobs:
           echo "epoch=$(git show -s --format=%ct "$release_commit")" >> "$GITHUB_OUTPUT"
 
       - name: Install exact runtime dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-release-lock.txt
 
       - name: Build exact release assets twice
         env:
@@ -74,6 +76,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python scripts/verify_release_integrity.py source "$RELEASE_COMMIT"
           python scripts/prepare_release.py \
             --version "$RELEASE_VERSION" \
             --tag "$GITHUB_REF_NAME" \
@@ -99,12 +102,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(python "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --version)" = \
+          mkdir smoke-assets
+          cp release-assets/*.py smoke-assets/
+          test "$(python "smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --version)" = \
             "GovHawk $RELEASE_VERSION"
-          python "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --help >/dev/null
-          python "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --list-services >/dev/null
+          python "smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --help >/dev/null
+          python "smoke-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.py" --list-services >/dev/null
+
+      - name: Revalidate source and exact final bytes
+        id: final
+        env:
+          RELEASE_COMMIT: ${{ steps.identity.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_release_integrity.py source "$RELEASE_COMMIT"
+          expected="$(python scripts/verify_release_integrity.py assets repeat-release-assets -)"
+          python scripts/verify_release_integrity.py assets release-assets "$expected"
+          echo "manifest=$expected" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the exact release assets
+        id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets
@@ -125,8 +143,21 @@ jobs:
       - name: Download the exact release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-assets
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: release-assets
+          merge-multiple: true
+
+      - name: Check out integrity verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: verifier
+
+      - name: Verify bytes before attestation
+        env:
+          EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
+        run: python verifier/scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
 
       - name: Attest every release asset
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -138,28 +169,34 @@ jobs:
     needs: [build, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    environment: release
     permissions:
       contents: write
     steps:
       - name: Check out tagged release notes
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Download the exact release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-assets
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: release-assets
+          merge-multiple: true
 
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
         shell: bash
         run: |
           set -euo pipefail
+          python scripts/verify_release_integrity.py assets release-assets "$EXPECTED_MANIFEST"
+          python scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --draft \
@@ -172,14 +209,23 @@ jobs:
             "release-assets/AWS-GovHawk-Efficiency-Analyzer-v$RELEASE_VERSION.spdx.json" \
             "release-assets/SHA256SUMS.txt" \
             "release-assets/release-evidence.json"
+          if ! python scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"; then
+            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
+            exit 1
+          fi
 
       - name: Verify exact draft state
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          EXPECTED_MANIFEST: ${{ needs.build.outputs.manifest }}
         shell: bash
         run: |
           set -euo pipefail
+          python scripts/verify_release_integrity.py tag "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$RELEASE_COMMIT"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir readback-assets
+          python scripts/verify_release_integrity.py assets readback-assets "$EXPECTED_MANIFEST"
           gh release view "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --json isDraft,isPrerelease,assets > release-state.json

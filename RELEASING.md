@@ -66,6 +66,18 @@ Pushing the tag starts `.github/workflows/release.yml`. The workflow:
 
 The workflow has no manual trigger and no release-publication command.
 
+The active `Immutable release tags` ruleset prevents updates and deletion of
+`v*` tags. The `release` deployment environment admits only `v*` tags. The draft
+job verifies and peels the remote tag immediately before and after creation,
+removing a mismatched draft. Release installations use the full transitive
+`requirements-release-lock.txt` with `--require-hashes`.
+
+Before building and after smoke testing, every packaged source file is compared
+with its Git blob at the verified commit. Smoke checks run a disposable runtime
+copy. The exact final assets are compared again, and their SHA-256 manifest is
+passed as a workflow output alongside the immutable artifact ID. Attestation,
+draft creation, and uploaded-asset readback each verify those exact hashes.
+
 ## Publication review
 
 Before publishing the draft:

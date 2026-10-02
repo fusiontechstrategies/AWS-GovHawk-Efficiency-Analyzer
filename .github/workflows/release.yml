@@ -125,7 +125,8 @@ jobs:
   smoke:
     name: Smoke-test immutable assets on an isolated consumer
     needs: build
-    runs-on: ubuntu-latest
+    # Match the successful native namespace integration; no host policy changes.
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -219,7 +220,8 @@ jobs:
           # Start with an empty filesystem. Host workspaces and pathname sockets,
           # including /run/docker.sock, are not carried into either sandbox.
           sandbox=("$SMOKE_SANDBOX_PATH" --unshare-all --die-with-parent --new-session --clearenv
-            --setenv HOME /tmp --setenv PATH /usr/bin:/bin --tmpfs /
+            --setenv HOME /tmp --setenv PATH /usr/bin:/bin
+            --setenv LD_LIBRARY_PATH "$SMOKE_BASE_PREFIX/lib" --tmpfs /
             --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64
             --ro-bind "$SMOKE_BASE_PREFIX" "$SMOKE_BASE_PREFIX"
             --ro-bind /etc/ssl /etc/ssl --ro-bind /etc/ld.so.cache /etc/ld.so.cache
@@ -254,7 +256,8 @@ jobs:
           # Only the interpreter, runtime and candidate are visible. No host
           # workspace, Docker socket, environment credentials or other services.
           sandbox=("$SMOKE_SANDBOX_PATH" --unshare-all --die-with-parent --new-session --clearenv
-            --setenv HOME /tmp --setenv PATH /usr/bin:/bin --tmpfs /
+            --setenv HOME /tmp --setenv PATH /usr/bin:/bin
+            --setenv LD_LIBRARY_PATH "$SMOKE_BASE_PREFIX/lib" --tmpfs /
             --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64
             --ro-bind "$SMOKE_BASE_PREFIX" "$SMOKE_BASE_PREFIX"
             --ro-bind /etc/ssl /etc/ssl --ro-bind /etc/ld.so.cache /etc/ld.so.cache

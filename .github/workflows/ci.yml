@@ -152,7 +152,7 @@ jobs:
 
   native-release-sandbox:
     name: Native release sandbox isolation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
       contents: read

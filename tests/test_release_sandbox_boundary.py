@@ -42,7 +42,23 @@ class ReleaseSandboxBoundary(unittest.TestCase):
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control_client:
                 control_client.connect(str(socket_path))
             files = {
-                "boundary_fixture.py": b'def main():\n    print("SHADOWED_SANDBOX")\n',
+                "boundary_fixture.py": (
+                    "import os, socket\n"
+                    "def main():\n    print('SHADOWED_SANDBOX')\n"
+                    "def verify_boundary():\n"
+                    "    assert 'SANDBOX_HOST_SECRET' not in os.environ\n"
+                    "    assert not os.path.exists('/run/docker.sock')\n"
+                    "    assert not os.path.exists('/var/run/docker.sock')\n"
+                    "    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+                    "    try:\n"
+                    f"        client.connect({str(socket_path)!r})\n"
+                    "    except (FileNotFoundError, PermissionError):\n        pass\n"
+                    "    else:\n        raise AssertionError('host socket exposed to pth')\n"
+                ).encode(),
+                "boundary_fixture.pth": (
+                    b"import sys, boundary_fixture; boundary_fixture.verify_boundary() "
+                    b"if sys.prefix == '/runtime' else None\n"
+                ),
                 "boundary_fixture-1.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: boundary-fixture\nVersion: 1.0\n",
                 "boundary_fixture-1.0.dist-info/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
                 "boundary_fixture-1.0.dist-info/entry_points.txt": b"[console_scripts]\nbwrap = boundary_fixture:main\n",

@@ -144,3 +144,15 @@ absent inside candidate execution; a synthetic inherited secret is also absent.
 That integration refuses namespace-creation failures rather than counting them
 as successful containment. Restricted local Docker tests retain their explicit
 limitation. No real host service sockets are contacted.
+
+The smoke consumer and its native integration use the same explicit Ubuntu22.04
+runner label because the current Ubuntu24 image refuses bubblewrap's loopback
+namespace initialization. No sysctl, AppArmor policy or capability is relaxed.
+The required native gate catches loss of namespace support. GitHub's published
+Ubuntu22 retirement date is April17,2027; migration requires the same successful
+native test on the replacement image before updating both labels:
+https://github.com/actions/runner-images/issues/14254
+Only the captured base interpreter's read-only lib directory is restored in
+LD_LIBRARY_PATH after clearenv, matching setup-python's shared-library needs.
+The synthetic wheel also installs a real .pth that checks socket/environment
+isolation when Python starts inside /runtime.

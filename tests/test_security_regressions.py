@@ -18,6 +18,16 @@ from scripts import verify_release_integrity as integrity
 
 
 class SecurityRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows directory sharing semantics")
+    def test_ancestor_guard_prevents_rename_without_staging_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "parent"
+            parent.mkdir()
+            with analyzer.windows_report_directory_lock(parent):
+                with self.assertRaises(PermissionError):
+                    parent.rename(Path(directory) / "replacement")
+            self.assertTrue(parent.is_dir())
+
     def test_vpc_subnet_failure_is_unknown_without_deletion_guidance(self):
         responses = [
             {"error": "synthetic AccessDenied"},

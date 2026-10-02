@@ -3117,9 +3117,9 @@ def windows_report_directory_lock(path, sid=None, remove_on_exit=False):
     kernel.GetFileInformationByHandleEx.restype = wintypes.BOOL
     kernel.LocalFree.argtypes = [ctypes.c_void_p]
     kernel.LocalFree.restype = ctypes.c_void_p
-    # READ_ATTRIBUTES, optionally READ_CONTROL/WRITE_DAC/DELETE. Never share delete.
+    # LIST_DIRECTORY activates sharing checks; READ_ATTRIBUTES alone does not. Never share delete.
     handle = kernel.CreateFileW(
-        str(path), 0x80 | (0x60000 if sid else 0) | (0x10000 if remove_on_exit else 0), 3, None, 3, 0x02200000, None
+        str(path), 0x81 | (0x60000 if sid else 0) | (0x10000 if remove_on_exit else 0), 3, None, 3, 0x02200000, None
     )
     if handle == ctypes.c_void_p(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())

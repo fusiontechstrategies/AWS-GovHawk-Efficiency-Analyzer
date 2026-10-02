@@ -15,6 +15,7 @@ guaranteed savings forecast.
 # Imports
 # ============================================================================
 import argparse
+import csv
 import datetime
 import html
 import json
@@ -24,9 +25,14 @@ import re
 import shlex
 import signal
 import stat
+
+# Fixed OS executables use separate arguments and never invoke a shell.
+import subprocess  # nosec B404
 import sys
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import timezone
 from pathlib import Path
 from time import sleep
@@ -285,6 +291,8 @@ def setup_cloudwatch_logging(log_group, log_stream, region):
     sequence_token = [None]
 
     class CloudWatchHandler(logging.Handler):
+        _govhawk_cloudwatch = True
+
         def emit(self, record):
             if shutdown_event.is_set():
                 return
@@ -312,6 +320,7 @@ def setup_cloudwatch_logging(log_group, log_stream, region):
     handler.setFormatter(JsonLogFormatter())
     logger.addHandler(handler)
     logger.info("CloudWatch logging enabled")
+    return handler
 
 
 # ============================================================================
@@ -1506,7 +1515,8 @@ def research_iam(client, skip_metrics=False):
         detail = {
             "policy_name": policy_name,
             "attachment_count": policy["AttachmentCount"],
-            "is_overly_permissive": False,
+            "is_overly_permissive": None,
+            "policy_analysis_status": "unknown",
             "estimated_savings": 0,
             "recommendations": [],
         }
@@ -1533,9 +1543,41 @@ def research_iam(client, skip_metrics=False):
             stmts = raw_doc.get("Statement", [])
             if isinstance(stmts, dict):
                 stmts = [stmts]
+            if not isinstance(stmts, list):
+                stmts = [None]
+            unknown = False
+            detail["is_overly_permissive"] = False
+            detail["policy_analysis_status"] = "reviewed-signals"
             for stmt in stmts:
                 if not isinstance(stmt, dict):
+                    unknown = True
                     continue
+                if stmt.get("Effect") not in {"Allow", "Deny"}:
+                    unknown = True
+                    continue
+                selectors = ("Action", "NotAction", "Resource", "NotResource")
+                if any(
+                    key in stmt
+                    and not (
+                        isinstance(stmt[key], str)
+                        or isinstance(stmt[key], list)
+                        and stmt[key]
+                        and all(isinstance(item, str) for item in stmt[key])
+                    )
+                    for key in selectors
+                ):
+                    unknown = True
+                    continue
+                if ("Resource" in stmt) == ("NotResource" in stmt) or ("Action" in stmt) == ("NotAction" in stmt):
+                    unknown = True
+                    continue
+                if stmt.get("Effect") == "Allow" and "NotResource" in stmt:
+                    detail["is_overly_permissive"] = True
+                    detail["recommendations"].append(
+                        {
+                            "description": "Allow with NotResource potentially grants access to every resource outside the exclusions. Review action scope and conditions; this is a broad-access signal, not a safe policy conclusion."
+                        }
+                    )
                 actions = stmt.get("Action", [])
                 not_actions = stmt.get("NotAction", [])
                 resources = stmt.get("Resource", [])
@@ -1559,6 +1601,15 @@ def research_iam(client, skip_metrics=False):
                             "description": "Policy contains an Allow statement with broad actions and Resource '*'. Review conditions and scope it to least privilege where supported."
                         }
                     )
+            if unknown:
+                detail["policy_analysis_status"] = "unknown-elements"
+                if detail["is_overly_permissive"] is not True:
+                    detail["is_overly_permissive"] = None
+                detail["recommendations"].append(
+                    {
+                        "description": "Policy includes malformed or unsupported selectors. No least-privilege conclusion can be made."
+                    }
+                )
         else:
             detail["recommendations"].append({"description": "Policy document unavailable. Verify configuration."})
         if detail["attachment_count"] == 0:
@@ -2926,70 +2977,86 @@ def generate_service_details(story, data, styles):
         story.append(Spacer(1, 0.1 * inch))
 
 
+@contextmanager
+def private_report_file(output_path):
+    """Create an owner-only regular file before writing and publish without overwrite."""
+    requested = Path(output_path).expanduser().absolute()
+    parent = requested.parent.resolve()
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        info = parent.stat()
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise PermissionError("Report parent must be owned by this user and not writable by others")
+    staging = Path(tempfile.mkdtemp(prefix=".govhawk-private-", dir=parent))
+    temporary = staging / "report"
+    try:
+        if os.name == "nt":
+            system32 = Path(os.environ["SystemRoot"]) / "System32"
+            identity = subprocess.run(  # nosec B603
+                [str(system32 / "whoami.exe"), "/user", "/fo", "csv", "/nh"], check=True, capture_output=True, text=True
+            )  # noqa: S603
+            sid = next(csv.reader([identity.stdout.strip()]))[1]
+            if not re.fullmatch(r"S-1-[0-9-]+", sid):
+                raise PermissionError("Cannot resolve current user SID")
+            # SID is validated and the generated staging path is one argument.
+            subprocess.run(  # nosec B603
+                [str(system32 / "icacls.exe"), str(staging), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],
+                check=True,
+                capture_output=True,
+            )  # noqa: S603
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        fd = os.open(temporary, flags, 0o600)
+        with os.fdopen(fd, "w+b") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise PermissionError("Report temporary file is not regular")
+            if sys.platform != "win32" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600):
+                raise PermissionError("Report temporary file is not owner-only")
+            yield stream
+            stream.flush()
+            os.fsync(stream.fileno())
+        # Linking fails if any final entry exists, including a symlink or hard link.
+        os.link(temporary, parent / requested.name)
+    finally:
+        temporary.unlink(missing_ok=True)
+        staging.rmdir()
+
+
 def generate_pdf_report(report_data, output_pdf_path):
     styles = create_pdf_styles()
-    output_path = Path(output_pdf_path).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
-    doc = SimpleDocTemplate(
-        str(temporary_path),
-        pagesize=letter,
-        rightMargin=0.75 * inch,
-        leftMargin=0.75 * inch,
-        topMargin=1.0 * inch,
-        bottomMargin=1.0 * inch,
-    )
-    doc.report_banner = str(report_data.get("banner", DEFAULT_BANNER))
+    output_path = Path(output_pdf_path).expanduser().absolute()
     story: list[Any] = []
     build_title_page(story, report_data, styles)
     generate_executive_summary(story, report_data, styles)
     generate_service_details(story, report_data, styles)
     try:
-        doc.build(story, onFirstPage=first_page_header, onLaterPages=later_pages_header_footer)
-        os.replace(temporary_path, output_path)
+        with private_report_file(output_path) as stream:
+            doc = SimpleDocTemplate(
+                stream,
+                pagesize=letter,
+                rightMargin=0.75 * inch,
+                leftMargin=0.75 * inch,
+                topMargin=1.0 * inch,
+                bottomMargin=1.0 * inch,
+            )
+            doc.report_banner = str(report_data.get("banner", DEFAULT_BANNER))
+            doc.build(story, onFirstPage=first_page_header, onLaterPages=later_pages_header_footer)
         logger.info(f"PDF report generated successfully: {output_path}")
         return str(output_path)
     except Exception as e:
         logger.error(f"Error building PDF: {sanitize_error_message(e)}")
-        try:
-            temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
 def write_json_report(report_data, output_json_path):
     """Write the report data atomically as UTF-8 JSON."""
-    output_path = Path(output_json_path).expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = output_path.with_name(f".{output_path.name}.tmp")
-    try:
-        with temporary_path.open("w", encoding="utf-8", newline="\n") as report_file:
-            json.dump(report_data, report_file, indent=2, sort_keys=True, ensure_ascii=False)
-            report_file.write("\n")
-        os.replace(temporary_path, output_path)
-        logger.info(f"JSON report generated successfully: {output_path}")
-        return str(output_path)
-    except Exception:
-        try:
-            temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
-def harden_output_permissions(output_path):
-    """Apply owner-only mode bits where the operating system honors them."""
-    try:
-        os.chmod(output_path, stat.S_IRUSR | stat.S_IWUSR)
-        if os.name == "nt":
-            logger.warning(
-                "Windows chmod does not enforce an owner-only ACL; protect the output directory with NTFS permissions."
-            )
-        return True
-    except OSError as e:
-        logger.warning(f"Could not set restrictive mode bits on report output: {type(e).__name__}")
-        return False
+    output_path = Path(output_json_path).expanduser().absolute()
+    with private_report_file(output_path) as report_file:
+        report_file.write(
+            (json.dumps(report_data, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+        )
+    logger.info(f"JSON report generated successfully: {output_path}")
+    return str(output_path)
 
 
 # ============================================================================
@@ -3074,7 +3141,7 @@ def resolve_services(requested):
     return resolved
 
 
-def main(argv=None):
+def _main(argv=None):
     global account_id, metric_lookback_days
 
     args = parse_args(argv)
@@ -3172,8 +3239,6 @@ def main(argv=None):
             json_data = dict(report_data)
             json_data.pop("logo_path", None)
             output_paths.append(write_json_report(json_data, output_dir / f"{base_name}.json"))
-        for output_path in output_paths:
-            harden_output_permissions(output_path)
     except Exception as e:
         logger.error(f"Report generation failed: {sanitize_error_message(e)}")
         return 1
@@ -3185,6 +3250,22 @@ def main(argv=None):
 
     logger.info("AWS GovCloud environment analysis completed")
     return 130 if shutdown_event.is_set() else 0
+
+
+def main(argv=None):
+    """Scope optional CloudWatch handlers to one invocation, including early exits."""
+
+    def cleanup():
+        for handler in list(logger.handlers):
+            if getattr(handler, "_govhawk_cloudwatch", False):
+                logger.removeHandler(handler)
+                handler.close()
+
+    cleanup()
+    try:
+        return _main(argv)
+    finally:
+        cleanup()
 
 
 if __name__ == "__main__":

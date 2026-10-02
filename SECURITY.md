@@ -27,3 +27,13 @@ requirements.
 The `--log-to-cloudwatch` option sends run logs to AWS and creates or reuses a
 log group and stream. Leave it disabled unless the destination and retention
 policy are approved.
+
+Each invocation removes and closes its CloudWatch handler, including failed or
+interrupted runs. A later invocation must opt in separately.
+
+Reports are written through exclusive regular-file descriptors in a private
+staging directory. POSIX reports have mode 0600 before content is written. On
+Windows, an owner-only NTFS ACL is established before creating the report file.
+Protection setup failure aborts generation. Existing final entries, including
+links, are never overwritten. POSIX output parents must belong to the current
+user and must not be writable by other users.

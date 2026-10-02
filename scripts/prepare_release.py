@@ -48,7 +48,9 @@ PACKAGE_FILES = (
     "pyproject.toml",
     "requirements-dev.txt",
     "requirements.txt",
+    "requirements-release-lock.txt",
     "scripts/prepare_release.py",
+    "scripts/verify_release_integrity.py",
     "tests/test_analyzer.py",
     "tests/test_release_assets.py",
 )
@@ -373,6 +375,15 @@ def prepare_release(
             {"bytes": path.stat().st_size, "name": path.name, "sha256": sha256_file(path)} for path in evidence_inputs
         ],
         "dependencies": dependencies,
+        "dependency_lock_sha256": sha256_file(project_root / "requirements-release-lock.txt"),
+        "dependency_artifact_hashes": sorted(
+            set(
+                re.findall(
+                    r"--hash=sha256:([0-9a-f]{64})",
+                    (project_root / "requirements-release-lock.txt").read_text(encoding="utf-8"),
+                )
+            )
+        ),
         "expected_release_assets": list(asset_names),
         "project": PROJECT_NAME,
         "release_date": release_date,

@@ -222,14 +222,7 @@ jobs:
             status=$?
             if [[ "$status" -ne 0 && "$created_id" =~ ^[0-9]+$ ]]; then
               if gh api "repos/$GH_REPO/releases/$created_id" > failed-draft.json 2>/dev/null; then
-                if CREATED_ID="$created_id" python -I - <<'PY'
-          import json, os
-          state = json.load(open('failed-draft.json'))
-          assert state['id'] == int(os.environ['CREATED_ID']) and state['draft'] is True
-          assert state['tag_name'] == os.environ['RELEASE_TAG']
-          assert state['target_commitish'] == os.environ['SOURCE_COMMIT']
-          PY
-                then
+                if CREATED_ID="$created_id" python -I -c 'import json, os; state = json.load(open("failed-draft.json")); assert state["id"] == int(os.environ["CREATED_ID"]) and state["draft"] is True; assert state["tag_name"] == os.environ["RELEASE_TAG"]; assert state["target_commitish"] == os.environ["SOURCE_COMMIT"]'; then
                   gh api --method DELETE "repos/$GH_REPO/releases/$created_id" >/dev/null || true
                 fi
               fi

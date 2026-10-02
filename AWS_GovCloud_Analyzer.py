@@ -3637,11 +3637,24 @@ def posix_private_report_file(parent, name):
     if sys.platform == "win32":
         raise OSError("POSIX directory descriptors are unavailable on Windows")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    parent_fd = os.open(parent, flags)
+    parent_fd = os.open(parent.anchor, flags)
     staging_fd = None
     staging_name = ".govhawk-private-" + os.urandom(16).hex()
     created = False
     try:
+        for part in parent.parts[1:]:
+            ancestor = os.fstat(parent_fd)
+            if ancestor.st_uid not in {0, os.geteuid()} or (
+                stat.S_IMODE(ancestor.st_mode) & 0o022 and not ancestor.st_mode & stat.S_ISVTX
+            ):
+                raise PermissionError("Report ancestry can be replaced by another user")
+            try:
+                child = os.open(part, flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o700, dir_fd=parent_fd)
+                child = os.open(part, flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = child
         info = os.fstat(parent_fd)
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
             raise PermissionError("Report parent must be owned by this user and not writable by others")
@@ -3682,7 +3695,6 @@ def private_report_file(output_path):
     # erase a mutable junction/symlink alias that could be retargeted afterward.
     parent = requested.parent
     if sys.platform != "win32":
-        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with posix_private_report_file(parent, requested.name) as stream:
             yield stream
         return

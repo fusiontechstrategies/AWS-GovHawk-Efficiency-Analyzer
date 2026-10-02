@@ -114,3 +114,23 @@ Resource progress events omit identifier values at DEBUG as well as INFO.
 Report and logo paths are not sent to logs. A logger filter and the CloudWatch
 formatter redact recognizable structured identifiers and absolute paths and
 discard traceback/stack attachments before rendering diagnostic records.
+
+Windows report ancestry is now walked one component at a time relative to retained
+directory handles. New parents, private staging and the report use `NtCreateFile`
+with no-reparse parsing; new objects have a protected owner DACL at creation.
+Publication links the open report handle to the retained output-parent handle
+without replacing an existing name. Cleanup deletes the original staging file
+and directory through those same handles. Pathname checks cannot authorize a
+different directory between validation and use. Native owned fixtures exercise
+an initially empty parent changed into a junction immediately before staging,
+plus successful publication, name collisions and cleanup after a forced error.
+
+The smoke consumer captures `/usr/bin/bwrap` and the base Python interpreter before
+selecting runtime wheels. It checks root ownership, mode and digest of the system
+launcher before installation and execution. Runtime wheels download as hash-bound
+data, then install offline inside that exact sandbox with only a disposable venv
+writable. The venv is never activated for system-tool lookup. Candidate Python is
+invoked by absolute path inside the same read-only, network-isolated boundary.
+The synthetic wheel test proves a real `bwrap` console-script collision cannot
+choose the launcher. Restricted container namespace creation may fail; that is
+explicit failure from the system tool, never success supplied by a shadow script.

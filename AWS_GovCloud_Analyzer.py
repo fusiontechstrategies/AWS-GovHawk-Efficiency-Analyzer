@@ -255,17 +255,22 @@ def paginated_api_call(service, client, operation_name, result_keys, **kwargs):
     try:
         operation = getattr(client, operation_name)
         if not client.can_paginate(operation_name):
-            return safe_api_call(service, operation, **kwargs)
+            response = safe_api_call(service, operation, **kwargs)
+            if isinstance(response, dict) and "error" in response:
+                return response
+            if not isinstance(response, dict) or any(not isinstance(response.get(key), list) for key in keys):
+                return {"error": "Inventory collection missing or malformed", "truncated": True}
+            return response
 
         combined: dict[str, Any] = {key: [] for key in keys}
         page_budget = InventoryBudget()
         for page in client.get_paginator(operation_name).paginate(**kwargs):
             page_budget.consume()
             page_budget.consume(page)
+            if not isinstance(page, dict) or any(not isinstance(page.get(key), list) for key in keys):
+                return {"error": "Inventory collection missing or malformed", "truncated": True}
             for key in keys:
-                values = page.get(key, [])
-                if isinstance(values, list):
-                    combined[key].extend(values)
+                combined[key].extend(page[key])
             if shutdown_event.is_set():
                 combined["truncated"] = True
                 break
@@ -638,9 +643,11 @@ def research_s3(client, cw_client, skip_metrics=False):
 def research_vpc(client, skip_metrics=False):
     logger.info("=== Starting VPC Research ===")
     response = paginated_api_call("VPC", client, "describe_vpcs", "Vpcs")
+    if not isinstance(response, dict) or not isinstance(response.get("Vpcs"), list):
+        return {"error": "VPC inventory missing or malformed", "inventory_complete": False}
     if "error" in response:
         return response
-    vpcs = response.get("Vpcs", [])
+    vpcs = response["Vpcs"]
     logger.info(f"Found {len(vpcs)} VPCs to analyze")
     region = research["region"]
 

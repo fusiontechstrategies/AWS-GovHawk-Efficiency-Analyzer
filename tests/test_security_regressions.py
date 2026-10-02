@@ -18,6 +18,19 @@ from scripts import verify_release_integrity as integrity
 
 
 class SecurityRegressionTests(unittest.TestCase):
+    def test_raw_malformed_paginator_collections_fail_closed(self):
+        for key in ("Subnets", "Vpcs"):
+            for page in ({}, {key: None}, {key: {}}, {key: "not-a-list"}):
+                with self.subTest(key=key, page=page):
+                    client = FakeClient("describe_vpcs", [page])
+                    result = analyzer.paginated_api_call("VPC", client, "describe_vpcs", key)
+                    self.assertIn("error", result)
+                    self.assertTrue(result["truncated"])
+                    if key == "Vpcs":
+                        report = analyzer.research_vpc(client)
+                        self.assertIn("error", report)
+                        self.assertFalse(report["inventory_complete"])
+
     @unittest.skipUnless(os.name == "nt", "Windows directory sharing semantics")
     def test_ancestor_guard_prevents_rename_without_staging_child(self):
         with tempfile.TemporaryDirectory() as directory:

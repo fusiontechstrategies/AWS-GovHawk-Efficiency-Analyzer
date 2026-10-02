@@ -78,9 +78,18 @@ jobs:
       - name: Check out authenticated source strictly as data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ steps.identity.outputs.source-commit }}
+          ref: refs/heads/main
           path: source-data
+          fetch-depth: 0
           persist-credentials: false
+      - name: Pin authenticated source data from independently checked main history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C source-data rev-parse HEAD)" = "$VERIFIER_COMMIT"
+          git -C source-data merge-base --is-ancestor "$SOURCE_COMMIT" HEAD
+          git -C source-data checkout --detach "$SOURCE_COMMIT"
+          test "$(git -C source-data rev-parse HEAD)" = "$SOURCE_COMMIT"
       - name: Download only the authenticated run's immutable candidate
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:

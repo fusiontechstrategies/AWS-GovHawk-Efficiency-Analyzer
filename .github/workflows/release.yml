@@ -160,6 +160,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
 
+      - name: Obtain the exact signed source dependency lock as data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GH_REPO/contents/requirements-release-lock.txt?ref=$SOURCE_COMMIT" > source-lock.json
+          python -I - <<'PY'
+          import base64, hashlib, json
+          from pathlib import Path
+          record = json.loads(Path('source-lock.json').read_text())
+          assert record['encoding'] == 'base64' and 0 < record['size'] <= 256 * 1024
+          encoded = ''.join(record['content'].split())
+          assert len(encoded) <= 350 * 1024
+          value = base64.b64decode(encoded, validate=True)
+          assert len(value) == record['size']
+          # Git's blob object name binds the returned bytes, not a credential hash.
+          blob = b'blob ' + str(len(value)).encode() + b'\0' + value
+          assert hashlib.sha1(blob, usedforsecurity=False).hexdigest() == record['sha']
+          Path('runtime-lock.txt').write_bytes(value)
+          PY
+
+      - name: Install exact hash-locked smoke runtime dependencies
+        run: python -I -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes -r runtime-lock.txt
+
       - name: Exercise the exact standalone runtime
         env:
           RELEASE_VERSION: ${{ needs.build.outputs.version }}

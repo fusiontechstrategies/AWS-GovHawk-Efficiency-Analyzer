@@ -18,6 +18,118 @@ from scripts import verify_release_integrity as integrity
 
 
 class SecurityRegressionTests(unittest.TestCase):
+    def test_raw_malformed_paginator_collections_fail_closed(self):
+        for key in ("Subnets", "Vpcs"):
+            for page in ({}, {key: None}, {key: {}}, {key: "not-a-list"}):
+                with self.subTest(key=key, page=page):
+                    client = FakeClient("describe_vpcs", [page])
+                    result = analyzer.paginated_api_call("VPC", client, "describe_vpcs", key)
+                    self.assertIn("error", result)
+                    self.assertTrue(result["truncated"])
+                    if key == "Vpcs":
+                        report = analyzer.research_vpc(client)
+                        self.assertIn("error", report)
+                        self.assertFalse(report["inventory_complete"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory sharing semantics")
+    def test_ancestor_guard_prevents_rename_without_staging_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "parent"
+            parent.mkdir()
+            with analyzer.windows_report_directory_lock(parent):
+                with self.assertRaises(PermissionError):
+                    parent.rename(Path(directory) / "replacement")
+            self.assertTrue(parent.is_dir())
+
+    def test_vpc_subnet_failure_is_unknown_without_deletion_guidance(self):
+        responses = [
+            {"error": "synthetic AccessDenied"},
+            {},
+            {"Subnets": [], "truncated": True},
+            {"Subnets": [{"SubnetId": "subnet-synthetic"}], "truncated": True},
+            {"error": "partial synthetic result", "Subnets": [{"SubnetId": "subnet-synthetic"}]},
+        ]
+        for response in responses:
+            with (
+                self.subTest(response=response),
+                patch.object(
+                    analyzer, "paginated_api_call", side_effect=[{"Vpcs": [{"VpcId": "vpc-synthetic"}]}, response]
+                ),
+            ):
+                result = analyzer.research_vpc(object())
+            detail = result["vpc_details"][0]
+            self.assertIsNone(detail["subnet_count"])
+            self.assertFalse(detail["subnet_inventory_complete"])
+            self.assertFalse(result["inventory_complete"])
+            self.assertEqual(result["subnet_inventory_unknown_count"], 1)
+            self.assertNotIn("delete-vpc", json.dumps(detail))
+
+    def test_vpc_interruption_and_truncated_enumeration_are_incomplete(self):
+        vpcs = [{"VpcId": "vpc-one"}, {"VpcId": "vpc-two"}]
+        with (
+            patch.object(analyzer, "paginated_api_call", side_effect=[{"Vpcs": vpcs}, {"Subnets": []}]),
+            patch.object(analyzer.shutdown_event, "is_set", side_effect=[False, True]),
+        ):
+            result = analyzer.research_vpc(object())
+        self.assertFalse(result["inventory_complete"])
+        self.assertEqual(result["vpcs_analyzed"], 1)
+        self.assertNotIn("delete-vpc", json.dumps(result))
+        with patch.object(analyzer, "paginated_api_call", side_effect=[{"Vpcs": [], "truncated": True}]):
+            result = analyzer.research_vpc(object())
+        self.assertFalse(result["inventory_complete"])
+
+    def test_vpc_verified_subnets_keep_known_inventory_semantics(self):
+        for subnets in ([], [{"SubnetId": "subnet-synthetic"}]):
+            with (
+                self.subTest(subnets=subnets),
+                patch.object(
+                    analyzer,
+                    "paginated_api_call",
+                    side_effect=[{"Vpcs": [{"VpcId": "vpc-synthetic"}]}, {"Subnets": subnets}],
+                ),
+            ):
+                result = analyzer.research_vpc(object())
+            detail = result["vpc_details"][0]
+            self.assertEqual(detail["subnet_count"], len(subnets))
+            self.assertTrue(result["inventory_complete"])
+            self.assertEqual(result["subnet_inventory_unknown_count"], 0)
+            self.assertEqual("delete-vpc" in json.dumps(detail), not subnets)
+
+    @unittest.skipUnless(os.name == "nt", "Windows cleanup sharing semantics")
+    def test_windows_cleanup_keeps_guards_through_unlink_on_success_and_failure(self):
+        original_unlink, original_link = Path.unlink, os.link
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as directory:
+                parent = Path(directory) / "reports"
+                parent.mkdir()
+                output = parent / "result.json"
+                cleaned = []
+
+                def unlink(path, *args, parent=parent, directory=directory, cleaned=cleaned, **kwargs):
+                    if path.name == "report" and path.parent.name.startswith(".govhawk-private-"):
+                        with self.assertRaises(PermissionError):
+                            path.parent.rename(parent / "replacement")
+                        with self.assertRaises(PermissionError):
+                            parent.rename(Path(directory) / "replacement-parent")
+                        cleaned.append(path)
+                    return original_unlink(path, *args, **kwargs)
+
+                def link(*args, fail=fail, **kwargs):
+                    if fail:
+                        raise OSError("synthetic publication failure")
+                    return original_link(*args, **kwargs)
+
+                with patch.object(Path, "unlink", unlink), patch.object(analyzer.os, "link", link):
+                    if fail:
+                        with self.assertRaisesRegex(OSError, "synthetic publication failure"):
+                            with analyzer.private_report_file(output) as stream:
+                                stream.write(b"synthetic")
+                    else:
+                        with analyzer.private_report_file(output) as stream:
+                            stream.write(b"synthetic")
+                self.assertEqual(len(cleaned), 1)
+                self.assertEqual(list(parent.iterdir()), [] if fail else [output])
+
     def test_ses_metacharacters_remain_argument_data(self):
         identity = "test&whoami@example.invalid"
         client = FakeClient(

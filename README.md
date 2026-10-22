@@ -1,7 +1,7 @@
 # GovHawk: AWS GovCloud Efficiency Analyzer
 
 [![CI](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml)
-![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB)
+![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB)
 ![AWS GovCloud](https://img.shields.io/badge/AWS-GovCloud-FF9900)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -71,7 +71,7 @@ and [Inspector migration notice](https://docs.aws.amazon.com/inspector/v1/usergu
 
 ## Requirements
 
-- Python 3.10 or later
+- Python 3.11 or later
 - AWS GovCloud credentials for the target account
 - Network access to the relevant GovCloud service endpoints
 - Permissions for the list, describe, get, and CloudWatch metric operations used

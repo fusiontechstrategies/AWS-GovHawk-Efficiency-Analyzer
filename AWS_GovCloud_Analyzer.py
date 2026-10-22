@@ -34,7 +34,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from datetime import timezone
 from functools import wraps
 from pathlib import Path
 from time import monotonic, sleep
@@ -521,7 +520,7 @@ class JsonLogFormatter(logging.Formatter):
         SensitiveDiagnosticFilter().filter(record)
         return json.dumps(
             {
-                "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
                 "level": record.levelname,
                 "logger": record.name,
                 "message": record.getMessage(),
@@ -568,7 +567,7 @@ def setup_cloudwatch_logging(log_group, log_stream, region):
                         "logStreamName": log_stream,
                         "logEvents": [
                             {
-                                "timestamp": int(datetime.datetime.now(timezone.utc).timestamp() * 1000),
+                                "timestamp": int(datetime.datetime.now(datetime.UTC).timestamp() * 1000),
                                 "message": log_entry,
                             }
                         ],
@@ -600,7 +599,7 @@ def research_s3(client, cw_client, skip_metrics=False):
         return response
     buckets = response.get("Buckets", [])
     logger.info(f"Found {len(buckets)} S3 buckets across the GovCloud partition")
-    end_time = datetime.datetime.now(timezone.utc)
+    end_time = datetime.datetime.now(datetime.UTC)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
     region = research["region"]
 
@@ -1015,7 +1014,7 @@ def research_lambda(client, cw_client, skip_metrics=False):
         return response
     functions = response.get("Functions", [])
     logger.info(f"Found {len(functions)} Lambda functions to analyze")
-    end_time = datetime.datetime.now(timezone.utc)
+    end_time = datetime.datetime.now(datetime.UTC)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
     region = research["region"]
 
@@ -1329,7 +1328,7 @@ def research_ebs(client, cw_client, skip_metrics=False):
         return response
     volumes = response.get("Volumes", [])
     logger.info(f"Found {len(volumes)} EBS volumes to analyze")
-    end_time = datetime.datetime.now(timezone.utc)
+    end_time = datetime.datetime.now(datetime.UTC)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
     region = research["region"]
 
@@ -2026,7 +2025,7 @@ def research_ec2(client, cw_client, skip_metrics=False):
             continue
         instances.extend(reservation["Instances"])
     logger.info(f"Found {len(instances)} EC2 instances to analyze")
-    end_time = datetime.datetime.now(timezone.utc)
+    end_time = datetime.datetime.now(datetime.UTC)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
     region = research["region"]
 
@@ -2306,7 +2305,7 @@ def research_rds(client, cw_client, skip_metrics=False):
         return response
     instances = response.get("DBInstances", [])
     logger.info(f"Found {len(instances)} RDS instances to analyze")
-    end_time = datetime.datetime.now(timezone.utc)
+    end_time = datetime.datetime.now(datetime.UTC)
     start_time = end_time - datetime.timedelta(days=metric_lookback_days)
 
     instance_details = []
@@ -2398,9 +2397,9 @@ def research_codecommit(client, skip_metrics=False):
         last_modified = metadata.get("lastModifiedDate")
         if isinstance(last_modified, datetime.datetime):
             if last_modified.tzinfo is None:
-                last_modified = last_modified.replace(tzinfo=timezone.utc)
+                last_modified = last_modified.replace(tzinfo=datetime.UTC)
             last_modified_text = last_modified.isoformat()
-            inactive_days = (datetime.datetime.now(timezone.utc) - last_modified).days
+            inactive_days = (datetime.datetime.now(datetime.UTC) - last_modified).days
         else:
             last_modified_text = "Unknown"
             inactive_days = None
@@ -2854,7 +2853,7 @@ def build_title_page(story, data, styles):
     story.append(HorizontalRule(width="70%", thickness=1, color=colors.HexColor("#444444")))
     story.append(Spacer(1, 0.2 * inch))
 
-    generated_at = datetime.datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    generated_at = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     story.append(Paragraph(f"Report Generated: {sanitize_for_paragraph(generated_at)}", styles["SubTitle"]))
     story.append(Paragraph(f"Source Data Timestamp: {sanitize_for_paragraph(formatted_timestamp)}", styles["SubTitle"]))
     story.append(Paragraph(f"AWS Region: {sanitize_for_paragraph(data.get('region', 'N/A'))}", styles["SubTitle"]))
@@ -4178,7 +4177,7 @@ def _main(argv=None):
     research.update(
         {
             "tool_version": VERSION,
-            "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
             "region": args.region,
             "metric_lookback_days": metric_lookback_days,
             "metrics_collected": not args.skip_metrics,
@@ -4203,7 +4202,7 @@ def _main(argv=None):
         )
         setup_cloudwatch_logging(
             log_group=args.cloudwatch_log_group,
-            log_stream=f"govhawk_{datetime.datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+            log_stream=f"govhawk_{datetime.datetime.now(datetime.UTC).strftime('%Y%m%d_%H%M%S')}",
             region=args.region,
         )
 
@@ -4230,7 +4229,7 @@ def _main(argv=None):
         logger.error("No service results were collected; no report was created")
         return 130 if shutdown_event.is_set() else 1
 
-    timestamp = datetime.datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output_dir).expanduser() if args.output_dir else Path(__file__).resolve().parent / "output"
     base_name = f"govhawk_report_{timestamp}"
     report_data = dict(research)

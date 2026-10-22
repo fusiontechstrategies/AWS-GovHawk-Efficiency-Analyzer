@@ -22,7 +22,7 @@ Every release asset receives GitHub build-provenance attestation. Existing relea
 
 1. Start from current protected `main`.
 2. Confirm runtime `VERSION`, changelog heading, and `.github/release-notes/vX.Y.Z.md` agree.
-3. Run all offline tests on Python 3.10, 3.12, and 3.14.
+3. Run all offline tests on Python 3.11, 3.12, and 3.14.
 4. Pass Ruff, formatting, mypy, Bandit, dependency audits, CodeQL, Semgrep, Trivy, dependency review, and full-history Gitleaks.
 5. Build the exact five assets twice with the candidate commit and commit time, then require identical filenames and bytes.
 6. Run `--version`, `--help`, and `--list-services` from the standalone asset.

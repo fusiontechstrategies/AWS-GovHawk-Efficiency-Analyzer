@@ -119,8 +119,8 @@ class AnalyzerTests(unittest.TestCase):
             "AWS/Test",
             "Requests",
             [],
-            datetime.datetime.now(datetime.timezone.utc),
-            datetime.datetime.now(datetime.timezone.utc),
+            datetime.datetime.now(datetime.UTC),
+            datetime.datetime.now(datetime.UTC),
             skip_metrics=True,
         )
         self.assertIsNone(metric["average"])

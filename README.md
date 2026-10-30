@@ -1,5 +1,9 @@
 # GovHawk: AWS GovCloud Efficiency Analyzer
 
+<p align="center">
+  <img src=".github/assets/social-preview.jpg" width="960" alt="AWS GovHawk: Find waste. Expose risk.">
+</p>
+
 [![CI](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB)
 ![AWS GovCloud](https://img.shields.io/badge/AWS-GovCloud-FF9900)
@@ -110,6 +114,8 @@ CloudWatch logging additionally requires `logs:CreateLogGroup`,
 Create and activate a virtual environment, then install the exact runtime dependencies:
 
 ```powershell
+git clone https://github.com/fusiontechstrategies/AWS-GovHawk-Efficiency-Analyzer.git
+Set-Location AWS-GovHawk-Efficiency-Analyzer
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip

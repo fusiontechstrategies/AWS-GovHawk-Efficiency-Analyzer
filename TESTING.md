@@ -4,7 +4,7 @@ Tests use local synthetic data, fake clients, and botocore API models. No live r
 
 ## 2.0.0 release-readiness validation
 
-The protected workflow covers Python 3.11, 3.12, and 3.14 on Linux. Local boundary validation uses the same three versions on Windows. Hosted and local gates must pass before release approval.
+The protected workflow covers Python 3.12, 3.13, and 3.14 on Linux. Local boundary validation uses the same three versions on Windows. Hosted and local gates must pass before release approval.
 
 ### Functional and report coverage
 

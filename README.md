@@ -13,7 +13,18 @@ JSON report, or both. It collects resource counts, selected CloudWatch metrics,
 configuration signals, and conservative recommendations without automatically
 changing the environment.
 
+> **Project status: release candidate.** The complete offline test and release-candidate gates run in CI, but no public tag or GitHub release exists yet. Evaluate protected repository source in an authorized non-production account and treat every recommendation as a review signal.
+
 [![GovHawk evidence to decision example](docs/images/govhawk-evidence-to-decision.png)](docs/images/source/govhawk-evidence-to-decision.svg)
+
+The synthetic example models the decision GovHawk is designed to support:
+
+| Step | Example |
+| --- | --- |
+| Observation | A resource exists and the requested metric returned samples for the selected window. |
+| Evidence | Inventory scope, metric status, collection errors, and report completeness remain visible together. |
+| Uncertainty | Missing data stays missing; a recommendation does not invent utilization, price, or realized savings. |
+| Review action | A workload owner validates business need, peak behavior, dependencies, and change controls before any separate remediation. |
 
 The executable remains one file: `AWS_GovCloud_Analyzer.py`. The other files in
 this repository provide documentation, tests, dependency declarations, and
@@ -29,6 +40,15 @@ continuous-integration support.
   same run.
 - Keep recommendations evidence-based, review-only, and free of invented dollar
   savings.
+
+## Where GovHawk fits
+
+| Tool or practice | What it provides | GovHawk's boundary |
+| --- | --- | --- |
+| AWS Cost Explorer | Billing and usage analysis from the associated standard AWS account | GovHawk deliberately does not query billing data or calculate dollar savings. |
+| AWS Compute Optimizer | AWS-generated optimization recommendations for supported resources | GovHawk inventories a broader GovCloud review surface and preserves missing evidence instead of substituting a savings claim. |
+| AWS Config and Security Hub | Managed configuration history, controls, and findings | GovHawk can surface review signals but does not replace managed controls, formal assessment, or remediation workflows. |
+| Workload-owner and FinOps review | Business context, peak demand, commitments, dependencies, and approved changes | GovHawk supplies evidence for that review; it cannot make the ownership decision. |
 
 ## Important boundaries
 
@@ -211,6 +231,11 @@ also remains blocked on the live controls in
   formal compliance assessment, or workload-owner review.
 - Live-account behavior still depends on permissions, enabled services, support
   plan, service quotas, and the size of the environment.
+
+## Related Fusion projects
+
+- [AWS Chaos Engineering Framework](https://github.com/fusiontechstrategies/AWS-Chaos-Engineering-Framework) provides separately authorized plan and experiment workflows; GovHawk findings do not become chaos targets automatically.
+- Explore the complete [Fusion Technology Strategies public portfolio](https://github.com/fusiontechstrategies/FusionTechStrategies).
 
 ## License
 
